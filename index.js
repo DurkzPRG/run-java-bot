@@ -266,4 +266,7 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
+process.on("unhandledRejection", (reason) => console.error("unhandledRejection:", reason));
+process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
+client.on("error", (err) => console.error("client error:", err));
 client.login(process.env.DISCORD_TOKEN);
