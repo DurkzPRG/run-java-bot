@@ -1,4 +1,6 @@
 require("dotenv").config();
+require("./server");
+
 const axios = require("axios");
 const {
   Client,
