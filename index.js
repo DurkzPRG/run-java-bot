@@ -17,44 +17,50 @@ async function sleep(ms) {
 }
 
 async function runOnJudge0(languageId, sourceCode) {
-    // cria submissão
-    const createRes = await axios.post(
-        `${JUDGE0_BASE}/submissions?base64_encoded=false&wait=false`,
-        {
-            language_id: languageId,
-            source_code: sourceCode,
-        },
-        { timeout: 15000 }
+  // cria submissão
+  const createRes = await axios.post(
+    `${JUDGE0_BASE}/submissions?base64_encoded=true&wait=false`,
+    {
+      language_id: languageId,
+      source_code: Buffer.from(sourceCode).toString("base64"),
+    }
+  );
+
+  const token = createRes.data.token;
+
+  // polling
+  for (let i = 0; i < 12; i++) {
+    await sleep(700);
+
+    const res = await axios.get(
+      `${JUDGE0_BASE}/submissions/${token}?base64_encoded=true`
     );
 
-    const token = createRes.data.token;
+    const status = res.data.status?.id;
 
-    // fazendo polling até finalizar
-    for (let i = 0; i < 12; i++) {
-        await sleep(700);
-
-        const res = await axios.get(
-            `${JUDGE0_BASE}/submissions/${token}?base64_encoded=false`,
-            { timeout: 15000 }
-        );
-
-        const s = res.data.status?.id; // 1/2 = em fila/processando herhe
-        if (s !== 1 && s !== 2) return res.data;
+    if (status !== 1 && status !== 2) {
+      return res.data;
     }
+  }
 
-    throw new Error("Timeout: demorou muito para executar.");
+  throw new Error("Timeout.");
+}
+
+function decode(value) {
+  if (!value) return "";
+  return Buffer.from(value, "base64").toString("utf-8");
 }
 
 function formatOutput(data) {
-    const stdout = (data.stdout ?? "").trim();
-    const stderr = (data.stderr ?? "").trim();
-    const compile = (data.compile_output ?? "").trim();
-    const status = data.status?.description ?? "Unknown";
+  const stdout = decode(data.stdout);
+  const stderr = decode(data.stderr);
+  const compile = decode(data.compile_output);
+  const status = data.status?.description ?? "Unknown";
 
-    if (compile) return `Status: ${status}\n\n[compile]\n${compile}`;
-    if (stderr) return `Status: ${status}\n\n[stderr]\n${stderr}`;
-    if (stdout) return `Status: ${status}\n\n[stdout]\n${stdout}`;
-    return `Status: ${status}\n\n(sem saída)`;
+  if (compile) return `Status: ${status}\n\n[compile]\n${compile}`;
+  if (stderr) return `Status: ${status}\n\n[stderr]\n${stderr}`;
+  if (stdout) return `Status: ${status}\n\n[stdout]\n${stdout}`;
+  return `Status: ${status}\n\n(sem saída)`;
 }
 
 client.once("clientReady", () => {
