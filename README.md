@@ -80,6 +80,17 @@ MIT License
 
 ---
 
+*Heads up
+
+Since the bot uses the public Judge0 service, sometimes the /run command can get congested and may timeout.
+
+If that happens, don’t freak out it’s not a bug in the bot. The external Judge0 servers are just busy at the moment.
+
+/clear will still work normally.
+
+If /run times out, just wait a few minutes and try again
+Thanks for your patience!
+
 #Contribution
 
 -Pull requests are welcome.
