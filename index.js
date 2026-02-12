@@ -43,6 +43,12 @@ function sanitizeInvisible(s) {
   return s.replace(/[\u200B-\u200D\uFEFF]/g, "");
 }
 
+function clampInt(n, min, max) {
+  n = Number(n);
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, Math.trunc(n)));
+}
+
 function isUnknownInteraction(err) {
   return err && (err.code === 10062 || err.rawError?.code === 10062);
 }
@@ -59,7 +65,8 @@ async function safeReply(interaction, payload) {
 
 async function safeShowModal(interaction, modal) {
   try {
-    const okType = typeof interaction?.isChatInputCommand === "function" && interaction.isChatInputCommand();
+    const okType =
+      typeof interaction?.isChatInputCommand === "function" && interaction.isChatInputCommand();
     const okFn = typeof interaction?.showModal === "function";
 
     if (!okType || !okFn) {
@@ -100,16 +107,22 @@ async function safeEditReply(interaction, payload) {
   }
 }
 
-async function runOnJudge0(languageId, sourceCode) {
+async function runOnJudge0(languageId, sourceCode, stdinText) {
+  const payload = {
+    language_id: languageId,
+    source_code: Buffer.from(sourceCode, "utf8").toString("base64"),
+    cpu_time_limit: CPU_TIME_LIMIT,
+    wall_time_limit: WALL_TIME_LIMIT,
+    memory_limit: MEMORY_LIMIT,
+  };
+
+  if (stdinText && stdinText.trim()) {
+    payload.stdin = Buffer.from(stdinText, "utf8").toString("base64");
+  }
+
   const createRes = await axios.post(
     `${JUDGE0_BASE}/submissions?base64_encoded=true&wait=false`,
-    {
-      language_id: languageId,
-      source_code: Buffer.from(sourceCode, "utf8").toString("base64"),
-      cpu_time_limit: CPU_TIME_LIMIT,
-      wall_time_limit: WALL_TIME_LIMIT,
-      memory_limit: MEMORY_LIMIT,
-    }
+    payload
   );
 
   const token = createRes.data.token;
@@ -117,11 +130,9 @@ async function runOnJudge0(languageId, sourceCode) {
   for (let i = 0; i < POLL_MAX_TRIES; i++) {
     await sleep(POLL_INTERVAL_MS);
 
-    const res = await axios.get(
-      `${JUDGE0_BASE}/submissions/${token}?base64_encoded=true`
-    );
-
+    const res = await axios.get(`${JUDGE0_BASE}/submissions/${token}?base64_encoded=true`);
     const status = res.data.status?.id;
+
     if (status !== 1 && status !== 2) return res.data;
   }
 
@@ -152,9 +163,7 @@ async function replyOutput(interaction, text) {
     return;
   }
 
-  const file = new AttachmentBuilder(Buffer.from(text, "utf8"), {
-    name: "output.txt",
-  });
+  const file = new AttachmentBuilder(Buffer.from(text, "utf8"), { name: "output.txt" });
 
   await safeEditReply(interaction, {
     content: "Saída grande — enviei como arquivo:",
@@ -188,17 +197,9 @@ function buildRunModal(lang) {
   return modal;
 }
 
-process.on("unhandledRejection", (reason) => {
-  console.error("unhandledRejection:", reason);
-});
-
-process.on("uncaughtException", (err) => {
-  console.error("uncaughtException:", err);
-});
-
-client.on("error", (err) => {
-  console.error("client error:", err);
-});
+process.on("unhandledRejection", (reason) => console.error("unhandledRejection:", reason));
+process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
+client.on("error", (err) => console.error("client error:", err));
 
 client.once("clientReady", () => {
   console.log(`Bot online: ${client.user.tag}`);
@@ -206,47 +207,49 @@ client.once("clientReady", () => {
 
 client.on("interactionCreate", async (interaction) => {
   if (interaction.isChatInputCommand() && interaction.commandName === "clear") {
-  const amount = interaction.options.getInteger("amount", true);
+    const rawAmount = interaction.options.getInteger("amount");
+    const amount = clampInt(rawAmount ?? 5, 1, 100);
 
-  const ok = await safeDeferReply(interaction);
-  if (!ok) return;
+    const ok = await safeDeferReply(interaction);
+    if (!ok) return;
 
-  try {
-    if (!interaction.inGuild()) {
-      await safeEditReply(interaction, "This command can only be used in a server.");
-      return;
+    try {
+      if (!interaction.inGuild()) {
+        await safeEditReply(interaction, "This command only works in servers.");
+        return;
+      }
+
+      const channel = interaction.channel;
+      if (!channel || typeof channel.bulkDelete !== "function") {
+        await safeEditReply(interaction, "I can't access this channel.");
+        return;
+      }
+
+      const me = interaction.guild.members.me;
+      if (!me) {
+        await safeEditReply(interaction, "Couldn't resolve bot permissions.");
+        return;
+      }
+
+      const perms = channel.permissionsFor(me);
+      if (!perms || !perms.has("ManageMessages")) {
+        await safeEditReply(interaction, "Missing permission: Manage Messages.");
+        return;
+      }
+
+      const deleted = await channel.bulkDelete(amount, true);
+
+      await safeEditReply(
+        interaction,
+        `🧹 Cleared ${deleted.size} message(s). (Older than 14 days can't be deleted.)`
+      );
+    } catch (err) {
+      await safeEditReply(interaction, "Error while deleting messages:\n" + (err?.message || "unknown"));
     }
 
-    if (!interaction.channel || typeof interaction.channel.bulkDelete !== "function") {
-      await safeEditReply(interaction, "I can't access this channel.");
-      return;
-    }
-
-    const me = interaction.guild.members.me;
-    if (!me) {
-      await safeEditReply(interaction, "Couldn't resolve bot permissions.");
-      return;
-    }
-
-    const perms = interaction.channel.permissionsFor(me);
-    if (!perms || !perms.has("ManageMessages")) {
-      await safeEditReply(interaction, "Missing permission: Manage Messages.");
-      return;
-    }
-
-    const deleted = await interaction.channel.bulkDelete(amount, true);
-
-    await safeEditReply(
-      interaction,
-      `Done. Deleted **${deleted.size}** message(s). (Messages older than 14 days cannot be deleted.)`
-    );
-  } catch (err) {
-    const msg = err?.message || "unknown";
-    await safeEditReply(interaction, "Error while deleting messages:\n" + msg);
+    return;
   }
 
-  return;
-}
   if (interaction.isChatInputCommand() && interaction.commandName === "run") {
     const lang = interaction.options.getString("lang", true);
     const languageId = LANG[lang];
@@ -257,27 +260,26 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     const codeRaw = interaction.options.getString("code", false);
+    const inputRaw = interaction.options.getString("input", false);
 
     if (!codeRaw || !codeRaw.trim()) {
       await safeShowModal(interaction, buildRunModal(lang));
       return;
     }
 
-    let code = stripCodeFences(codeRaw);
-    code = sanitizeInvisible(code);
+    let code = sanitizeInvisible(stripCodeFences(codeRaw));
+    const stdin = inputRaw ? sanitizeInvisible(inputRaw) : "";
 
     const ok = await safeDeferReply(interaction);
     if (!ok) return;
 
     try {
-      const result = await runOnJudge0(languageId, code);
+      const result = await runOnJudge0(languageId, code, stdin);
       const out = formatOutput(result);
       await replyOutput(interaction, out);
     } catch (err) {
       const details =
-        err?.response?.data
-          ? JSON.stringify(err.response.data, null, 2)
-          : (err?.message || "desconhecido");
+        err?.response?.data ? JSON.stringify(err.response.data, null, 2) : (err?.message || "desconhecido");
       await replyOutput(interaction, "Erro ao executar.\n\n" + details);
     }
 
@@ -301,8 +303,7 @@ client.on("interactionCreate", async (interaction) => {
       interaction.fields.getTextInputValue("code5") || "",
     ];
 
-    let code = stripCodeFences(parts.join("\n").trim());
-    code = sanitizeInvisible(code);
+    let code = sanitizeInvisible(stripCodeFences(parts.join("\n").trim()));
 
     if (!code) {
       await safeReply(interaction, { content: "Você não colou nenhum código.", ephemeral: true });
@@ -313,14 +314,12 @@ client.on("interactionCreate", async (interaction) => {
     if (!ok) return;
 
     try {
-      const result = await runOnJudge0(languageId, code);
+      const result = await runOnJudge0(languageId, code, "");
       const out = formatOutput(result);
       await replyOutput(interaction, out);
     } catch (err) {
       const details =
-        err?.response?.data
-          ? JSON.stringify(err.response.data, null, 2)
-          : (err?.message || "desconhecido");
+        err?.response?.data ? JSON.stringify(err.response.data, null, 2) : (err?.message || "desconhecido");
       await replyOutput(interaction, "Erro ao executar.\n\n" + details);
     }
   }
