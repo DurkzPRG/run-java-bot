@@ -3,18 +3,6 @@ const { REST, Routes, SlashCommandBuilder } = require("discord.js");
 
 const commands = [
   new SlashCommandBuilder()
-  .setName("runbig")
-  .setDescription("Executa código grande abrindo o editor (Modal).")
-  .addStringOption((opt) =>
-    opt
-      .setName("lang")
-      .setDescription("Linguagem")
-      .setRequired(true)
-      .addChoices({ name: "Java", value: "java" })
-  )
-  .toJSON(),
-
-  new SlashCommandBuilder()
     .setName("run")
     .setDescription("Executa um código e retorna o resultado (ex: Java).")
     .addStringOption((opt) =>
@@ -27,7 +15,7 @@ const commands = [
     .addStringOption((opt) =>
       opt
         .setName("code")
-        .setDescription("Cole o código (curto). Se vazio, abre o editor (Modal) pra código grande.")
+        .setDescription("Cole o código (curto). Se vazio, abre o editor (Modal).")
         .setRequired(false)
     )
     .toJSON(),

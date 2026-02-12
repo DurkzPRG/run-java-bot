@@ -36,6 +36,40 @@ function stripCodeFences(s) {
   return m ? m[1] : s;
 }
 
+function isUnknownInteraction(err) {
+  return err && (err.code === 10062 || err.rawError?.code === 10062);
+}
+
+async function safeShowModal(interaction, modal) {
+  try {
+    await interaction.showModal(modal);
+    return true;
+  } catch (err) {
+    if (isUnknownInteraction(err)) return false;
+    throw err;
+  }
+}
+
+async function safeDeferReply(interaction) {
+  try {
+    await interaction.deferReply();
+    return true;
+  } catch (err) {
+    if (isUnknownInteraction(err)) return false;
+    throw err;
+  }
+}
+
+async function safeEditReply(interaction, payload) {
+  try {
+    await interaction.editReply(payload);
+    return true;
+  } catch (err) {
+    if (isUnknownInteraction(err)) return false;
+    throw err;
+  }
+}
+
 async function runOnJudge0(languageId, sourceCode) {
   const createRes = await axios.post(
     `${JUDGE0_BASE}/submissions?base64_encoded=true&wait=false`,
@@ -84,7 +118,7 @@ function formatOutput(data) {
 async function replyOutput(interaction, text) {
   const wrapped = "```txt\n" + text + "\n```";
   if (wrapped.length <= 1900) {
-    await interaction.editReply(wrapped);
+    await safeEditReply(interaction, wrapped);
     return;
   }
 
@@ -92,7 +126,7 @@ async function replyOutput(interaction, text) {
     name: "output.txt",
   });
 
-  await interaction.editReply({
+  await safeEditReply(interaction, {
     content: "Saída grande — enviei como arquivo:",
     files: [file],
   });
@@ -124,57 +158,58 @@ function buildRunModal(lang) {
   return modal;
 }
 
-client.once("ready", () => {
+process.on("unhandledRejection", (reason) => {
+  console.error("unhandledRejection:", reason);
+});
+
+process.on("uncaughtException", (err) => {
+  console.error("uncaughtException:", err);
+});
+
+client.on("error", (err) => {
+  console.error("client error:", err);
+});
+
+client.once("clientReady", () => {
   console.log(`Bot online: ${client.user.tag}`);
 });
 
 client.on("interactionCreate", async (interaction) => {
-  if (interaction.isChatInputCommand()) {
-    if (interaction.commandName === "runbig") {
-      const lang = interaction.options.getString("lang", true);
-      const languageId = LANG[lang];
+  if (interaction.isChatInputCommand() && interaction.commandName === "run") {
+    const lang = interaction.options.getString("lang", true);
+    const languageId = LANG[lang];
 
-      if (!languageId) {
-        return interaction.reply({ content: "Linguagem não suportada.", ephemeral: true });
+    if (!languageId) {
+      try {
+        await interaction.reply({ content: "Linguagem não suportada.", ephemeral: true });
+      } catch (err) {
+        if (!isUnknownInteraction(err)) throw err;
       }
-
-      await interaction.showModal(buildRunModal(lang));
       return;
     }
 
-    if (interaction.commandName === "run") {
-      const lang = interaction.options.getString("lang", true);
-      const languageId = LANG[lang];
+    const codeRaw = interaction.options.getString("code", false);
 
-      if (!languageId) {
-        return interaction.reply({ content: "Linguagem não suportada.", ephemeral: true });
-      }
-
-      const codeRaw = interaction.options.getString("code", false);
-
-      if (!codeRaw || !codeRaw.trim()) {
-        await interaction.showModal(buildRunModal(lang));
-        return;
-      }
-
-      const code = stripCodeFences(codeRaw);
-
-      await interaction.deferReply();
-
-      try {
-        const result = await runOnJudge0(languageId, code);
-        const out = formatOutput(result);
-        await replyOutput(interaction, out);
-      } catch (err) {
-        const details =
-          err?.response?.data
-            ? JSON.stringify(err.response.data, null, 2)
-            : (err?.message || "desconhecido");
-
-        await replyOutput(interaction, "Erro ao executar.\n\n" + details);
-      }
-
+    if (!codeRaw || !codeRaw.trim()) {
+      await safeShowModal(interaction, buildRunModal(lang));
       return;
+    }
+
+    const code = stripCodeFences(codeRaw);
+
+    const ok = await safeDeferReply(interaction);
+    if (!ok) return;
+
+    try {
+      const result = await runOnJudge0(languageId, code);
+      const out = formatOutput(result);
+      await replyOutput(interaction, out);
+    } catch (err) {
+      const details =
+        err?.response?.data
+          ? JSON.stringify(err.response.data, null, 2)
+          : (err?.message || "desconhecido");
+      await replyOutput(interaction, "Erro ao executar.\n\n" + details);
     }
 
     return;
@@ -185,7 +220,12 @@ client.on("interactionCreate", async (interaction) => {
     const languageId = LANG[lang];
 
     if (!languageId) {
-      return interaction.reply({ content: "Linguagem não suportada.", ephemeral: true });
+      try {
+        await interaction.reply({ content: "Linguagem não suportada.", ephemeral: true });
+      } catch (err) {
+        if (!isUnknownInteraction(err)) throw err;
+      }
+      return;
     }
 
     const parts = [
@@ -199,10 +239,16 @@ client.on("interactionCreate", async (interaction) => {
     const code = stripCodeFences(parts.join("\n").trim());
 
     if (!code) {
-      return interaction.reply({ content: "Você não colou nenhum código.", ephemeral: true });
+      try {
+        await interaction.reply({ content: "Você não colou nenhum código.", ephemeral: true });
+      } catch (err) {
+        if (!isUnknownInteraction(err)) throw err;
+      }
+      return;
     }
 
-    await interaction.deferReply();
+    const ok = await safeDeferReply(interaction);
+    if (!ok) return;
 
     try {
       const result = await runOnJudge0(languageId, code);
@@ -213,7 +259,6 @@ client.on("interactionCreate", async (interaction) => {
         err?.response?.data
           ? JSON.stringify(err.response.data, null, 2)
           : (err?.message || "desconhecido");
-
       await replyOutput(interaction, "Erro ao executar.\n\n" + details);
     }
   }
