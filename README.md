@@ -60,9 +60,13 @@ Built with:
 ##Security Model
 
 -Code execution occurs inside Judge0 sandbox
+
 -Strict CPU, memory, and wall-time limit
+
 -Base64 encoding for integrity
+
 -Safe handling of expired Discord interactions
+
 -Output length protection
 
 ---
