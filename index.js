@@ -205,6 +205,48 @@ client.once("clientReady", () => {
 });
 
 client.on("interactionCreate", async (interaction) => {
+  if (interaction.isChatInputCommand() && interaction.commandName === "clear") {
+  const amount = interaction.options.getInteger("amount", true);
+
+  const ok = await safeDeferReply(interaction);
+  if (!ok) return;
+
+  try {
+    if (!interaction.inGuild()) {
+      await safeEditReply(interaction, "This command can only be used in a server.");
+      return;
+    }
+
+    if (!interaction.channel || typeof interaction.channel.bulkDelete !== "function") {
+      await safeEditReply(interaction, "I can't access this channel.");
+      return;
+    }
+
+    const me = interaction.guild.members.me;
+    if (!me) {
+      await safeEditReply(interaction, "Couldn't resolve bot permissions.");
+      return;
+    }
+
+    const perms = interaction.channel.permissionsFor(me);
+    if (!perms || !perms.has("ManageMessages")) {
+      await safeEditReply(interaction, "Missing permission: Manage Messages.");
+      return;
+    }
+
+    const deleted = await interaction.channel.bulkDelete(amount, true);
+
+    await safeEditReply(
+      interaction,
+      `Done. Deleted **${deleted.size}** message(s). (Messages older than 14 days cannot be deleted.)`
+    );
+  } catch (err) {
+    const msg = err?.message || "unknown";
+    await safeEditReply(interaction, "Error while deleting messages:\n" + msg);
+  }
+
+  return;
+}
   if (interaction.isChatInputCommand() && interaction.commandName === "run") {
     const lang = interaction.options.getString("lang", true);
     const languageId = LANG[lang];
