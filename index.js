@@ -7,7 +7,7 @@ const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 // Judge0 CE
 const JUDGE0_BASE = "https://ce.judge0.com";
 
-// nomes → language_id do Judge0
+// nomes language_id do Judge0
 const LANG = {
     java: 62,        // Java (OpenJDK)
 };
