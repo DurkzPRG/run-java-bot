@@ -12,20 +12,18 @@ const {
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
-// Judge0 CE
 const JUDGE0_BASE = "https://ce.judge0.com";
 
-// language_id do Judge0
 const LANG = {
-  java: 62, // Java (OpenJDK)
+  java: 62,
 };
 
-const CPU_TIME_LIMIT = Number(process.env.CPU_TIME_LIMIT || 5);        // segundos
-const WALL_TIME_LIMIT = Number(process.env.WALL_TIME_LIMIT || 8);      // segundos
-const MEMORY_LIMIT = Number(process.env.MEMORY_LIMIT || 256000);       // KB~256MB
+const CPU_TIME_LIMIT = Number(process.env.CPU_TIME_LIMIT || 5);
+const WALL_TIME_LIMIT = Number(process.env.WALL_TIME_LIMIT || 8);
+const MEMORY_LIMIT = Number(process.env.MEMORY_LIMIT || 256000);
 
-const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 700);  // ms
-const POLL_MAX_TRIES = Number(process.env.POLL_MAX_TRIES || 60);       // 60*700ms = 42s
+const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 700);
+const POLL_MAX_TRIES = Number(process.env.POLL_MAX_TRIES || 60);
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -60,7 +58,6 @@ async function runOnJudge0(languageId, sourceCode) {
     );
 
     const status = res.data.status?.id;
-    // 1=In Queue, 2=Processing
     if (status !== 1 && status !== 2) return res.data;
   }
 
@@ -91,7 +88,6 @@ async function replyOutput(interaction, text) {
     return;
   }
 
-  // Se não couber, manda como arquivo
   const file = new AttachmentBuilder(Buffer.from(text, "utf8"), {
     name: "output.txt",
   });
@@ -133,56 +129,63 @@ client.once("ready", () => {
 });
 
 client.on("interactionCreate", async (interaction) => {
-  // /run (slash)
-  if (interaction.isChatInputCommand() && interaction.commandName === "run") {
-    const lang = interaction.options.getString("lang", true);
-    const languageId = LANG[lang];
+  if (interaction.isChatInputCommand()) {
+    if (interaction.commandName === "runbig") {
+      const lang = interaction.options.getString("lang", true);
+      const languageId = LANG[lang];
 
-    if (!languageId) {
-      return interaction.reply({
-        content: "Linguagem não suportada.",
-        ephemeral: true,
-      });
-    }
+      if (!languageId) {
+        return interaction.reply({ content: "Linguagem não suportada.", ephemeral: true });
+      }
 
-    const codeRaw = interaction.options.getString("code", false);
-
-    if (!codeRaw || !codeRaw.trim()) {
-      const modal = buildRunModal(lang);
-      await interaction.showModal(modal);
+      await interaction.showModal(buildRunModal(lang));
       return;
     }
 
-    const code = stripCodeFences(codeRaw);
+    if (interaction.commandName === "run") {
+      const lang = interaction.options.getString("lang", true);
+      const languageId = LANG[lang];
 
-    await interaction.deferReply();
+      if (!languageId) {
+        return interaction.reply({ content: "Linguagem não suportada.", ephemeral: true });
+      }
 
-    try {
-      const result = await runOnJudge0(languageId, code);
-      const out = formatOutput(result);
-      await replyOutput(interaction, out);
-    } catch (err) {
-      const details =
-        err?.response?.data
-          ? JSON.stringify(err.response.data, null, 2)
-          : (err?.message || "desconhecido");
-      console.error("Judge0 error:", details);
-      await replyOutput(interaction, "Erro ao executar.\n\n" + details);
+      const codeRaw = interaction.options.getString("code", false);
+
+      if (!codeRaw || !codeRaw.trim()) {
+        await interaction.showModal(buildRunModal(lang));
+        return;
+      }
+
+      const code = stripCodeFences(codeRaw);
+
+      await interaction.deferReply();
+
+      try {
+        const result = await runOnJudge0(languageId, code);
+        const out = formatOutput(result);
+        await replyOutput(interaction, out);
+      } catch (err) {
+        const details =
+          err?.response?.data
+            ? JSON.stringify(err.response.data, null, 2)
+            : (err?.message || "desconhecido");
+
+        await replyOutput(interaction, "Erro ao executar.\n\n" + details);
+      }
+
+      return;
     }
 
     return;
   }
 
-  //Submit do Modal
   if (interaction.isModalSubmit() && interaction.customId.startsWith("run_modal:")) {
     const lang = interaction.customId.split(":")[1];
     const languageId = LANG[lang];
 
     if (!languageId) {
-      return interaction.reply({
-        content: "Linguagem não suportada.",
-        ephemeral: true,
-      });
+      return interaction.reply({ content: "Linguagem não suportada.", ephemeral: true });
     }
 
     const parts = [
@@ -193,8 +196,7 @@ client.on("interactionCreate", async (interaction) => {
       interaction.fields.getTextInputValue("code5") || "",
     ];
 
-    let code = parts.join("\n").trim();
-    code = stripCodeFences(code);
+    const code = stripCodeFences(parts.join("\n").trim());
 
     if (!code) {
       return interaction.reply({ content: "Você não colou nenhum código.", ephemeral: true });
@@ -211,11 +213,9 @@ client.on("interactionCreate", async (interaction) => {
         err?.response?.data
           ? JSON.stringify(err.response.data, null, 2)
           : (err?.message || "desconhecido");
-      console.error("Judge0 error:", details);
+
       await replyOutput(interaction, "Erro ao executar.\n\n" + details);
     }
-
-    return;
   }
 });
 
