@@ -10,9 +10,10 @@ const {
   TextInputStyle,
   ActionRowBuilder,
   AttachmentBuilder,
+  PermissionsBitField,
 } = require("discord.js");
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
 
 const JUDGE0_BASE = "https://ce.judge0.com";
 
@@ -52,9 +53,9 @@ async function safeShowModal(interaction, modal) {
   }
 }
 
-async function safeDeferReply(interaction) {
+async function safeDeferReply(interaction, ephemeral = false) {
   try {
-    await interaction.deferReply();
+    await interaction.deferReply({ ephemeral });
     return true;
   } catch (err) {
     if (isUnknownInteraction(err)) return false;
@@ -72,16 +73,22 @@ async function safeEditReply(interaction, payload) {
   }
 }
 
-async function runOnJudge0(languageId, sourceCode) {
+async function runOnJudge0(languageId, sourceCode, stdin) {
+  const body = {
+    language_id: languageId,
+    source_code: Buffer.from(sourceCode, "utf8").toString("base64"),
+    cpu_time_limit: CPU_TIME_LIMIT,
+    wall_time_limit: WALL_TIME_LIMIT,
+    memory_limit: MEMORY_LIMIT,
+  };
+
+  if (stdin !== undefined && stdin !== null) {
+    body.stdin = Buffer.from(String(stdin), "utf8").toString("base64");
+  }
+
   const createRes = await axios.post(
     `${JUDGE0_BASE}/submissions?base64_encoded=true&wait=false`,
-    {
-      language_id: languageId,
-      source_code: Buffer.from(sourceCode, "utf8").toString("base64"),
-      cpu_time_limit: CPU_TIME_LIMIT,
-      wall_time_limit: WALL_TIME_LIMIT,
-      memory_limit: MEMORY_LIMIT,
-    }
+    body
   );
 
   const token = createRes.data.token;
@@ -160,6 +167,32 @@ function buildRunModal(lang) {
   return modal;
 }
 
+function buildInputModal(key) {
+  return new ModalBuilder()
+    .setCustomId(`run_input:${key}`)
+    .setTitle("Entrada do programa (stdin)")
+    .addComponents(
+      new ActionRowBuilder().addComponents(
+        new TextInputBuilder()
+          .setCustomId("stdin")
+          .setLabel("Cole a entrada (opcional). Ex: 10+2")
+          .setStyle(TextInputStyle.Paragraph)
+          .setRequired(false)
+          .setMaxLength(4000)
+      )
+    );
+}
+
+const pendingRuns = new Map();
+const PENDING_TTL_MS = 2 * 60 * 1000;
+
+function cleanupPending() {
+  const now = Date.now();
+  for (const [k, v] of pendingRuns) {
+    if (!v || now - v.createdAt > PENDING_TTL_MS) pendingRuns.delete(k);
+  }
+}
+
 process.on("unhandledRejection", (reason) => {
   console.error("unhandledRejection:", reason);
 });
@@ -177,6 +210,52 @@ client.once("clientReady", () => {
 });
 
 client.on("interactionCreate", async (interaction) => {
+  if (interaction.isChatInputCommand() && interaction.commandName === "clear") {
+    if (!interaction.inGuild()) {
+      try {
+        await interaction.reply({ content: "Use este comando em um servidor.", ephemeral: true });
+      } catch (err) {
+        if (!isUnknownInteraction(err)) throw err;
+      }
+      return;
+    }
+
+    const amount = interaction.options.getInteger("quantidade", true);
+
+    if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageMessages)) {
+      try {
+        await interaction.reply({ content: "Você não tem permissão para apagar mensagens.", ephemeral: true });
+      } catch (err) {
+        if (!isUnknownInteraction(err)) throw err;
+      }
+      return;
+    }
+
+    const me = interaction.guild.members.me;
+    if (!me?.permissions?.has(PermissionsBitField.Flags.ManageMessages)) {
+      try {
+        await interaction.reply({ content: "Eu não tenho permissão de **Gerenciar mensagens** aqui.", ephemeral: true });
+      } catch (err) {
+        if (!isUnknownInteraction(err)) throw err;
+      }
+      return;
+    }
+
+    const ok = await safeDeferReply(interaction, true);
+    if (!ok) return;
+
+    try {
+      const deleted = await interaction.channel.bulkDelete(amount, true);
+      await safeEditReply(interaction, `✅ Apaguei **${deleted.size}** mensagens.`);
+    } catch (err) {
+      await safeEditReply(
+        interaction,
+        "Não consegui apagar. Pode ter mensagens com mais de 14 dias ou faltou permissão."
+      );
+    }
+    return;
+  }
+
   if (interaction.isChatInputCommand() && interaction.commandName === "run") {
     const lang = interaction.options.getString("lang", true);
     const languageId = LANG[lang];
@@ -191,6 +270,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     const codeRaw = interaction.options.getString("code", false);
+    const inputOpt = interaction.options.getString("input", false);
 
     if (!codeRaw || !codeRaw.trim()) {
       await safeShowModal(interaction, buildRunModal(lang));
@@ -203,7 +283,7 @@ client.on("interactionCreate", async (interaction) => {
     if (!ok) return;
 
     try {
-      const result = await runOnJudge0(languageId, code);
+      const result = await runOnJudge0(languageId, code, inputOpt ?? undefined);
       const out = formatOutput(result);
       await replyOutput(interaction, out);
     } catch (err) {
@@ -249,11 +329,39 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
+    cleanupPending();
+
+    const key = `${interaction.user.id}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
+    pendingRuns.set(key, { userId: interaction.user.id, lang, languageId, code, createdAt: Date.now() });
+
+    await safeShowModal(interaction, buildInputModal(key));
+    return;
+  }
+
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("run_input:")) {
+    cleanupPending();
+
+    const key = interaction.customId.slice("run_input:".length);
+    const pending = pendingRuns.get(key);
+
+    if (!pending || pending.userId !== interaction.user.id) {
+      try {
+        await interaction.reply({ content: "Esse run expirou. Rode o /run novamente.", ephemeral: true });
+      } catch (err) {
+        if (!isUnknownInteraction(err)) throw err;
+      }
+      return;
+    }
+
+    pendingRuns.delete(key);
+
+    const stdin = interaction.fields.getTextInputValue("stdin") || "";
+
     const ok = await safeDeferReply(interaction);
     if (!ok) return;
 
     try {
-      const result = await runOnJudge0(languageId, code);
+      const result = await runOnJudge0(pending.languageId, pending.code, stdin);
       const out = formatOutput(result);
       await replyOutput(interaction, out);
     } catch (err) {

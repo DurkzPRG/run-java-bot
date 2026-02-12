@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { REST, Routes, SlashCommandBuilder } = require("discord.js");
+const { REST, Routes, SlashCommandBuilder, PermissionFlagsBits } = require("discord.js");
 
 const commands = [
   new SlashCommandBuilder()
@@ -18,6 +18,26 @@ const commands = [
         .setDescription("Cole o código (curto). Se vazio, abre o editor (Modal).")
         .setRequired(false)
     )
+    .addStringOption((opt) =>
+      opt
+        .setName("input")
+        .setDescription("Entrada (stdin) opcional para o programa.")
+        .setRequired(false)
+    )
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName("clear")
+    .setDescription("Apaga N mensagens recentes do canal (máx 100; não apaga mensagens com +14 dias).")
+    .addIntegerOption((opt) =>
+      opt
+        .setName("quantidade")
+        .setDescription("Quantidade de mensagens para apagar (1 a 100).")
+        .setRequired(true)
+        .setMinValue(1)
+        .setMaxValue(100)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
     .toJSON(),
 ];
 
