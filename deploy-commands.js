@@ -27,19 +27,17 @@ const commands = [
     .toJSON(),
 
   new SlashCommandBuilder()
-    .setName("clear")
-    .setDescription("Apaga N mensagens recentes do canal (máx 100; não apaga mensagens com +14 dias).")
-    .addIntegerOption((opt) =>
-      opt
-        .setName("quantidade")
-        .setDescription("Quantidade de mensagens para apagar (1 a 100).")
-        .setRequired(true)
-        .setMinValue(1)
-        .setMaxValue(100)
-    )
-    .setDefaultMemberPermissions(PermissionFlagsBits.ManageMessages)
-    .toJSON(),
-];
+  .setName("clear")
+  .setDescription("Delete the last N messages from this channel.")
+  .addIntegerOption((opt) =>
+    opt
+      .setName("amount")
+      .setDescription("How many messages to delete (1-100)")
+      .setRequired(true)
+      .setMinValue(1)
+      .setMaxValue(100)
+  )
+  .toJSON(),
 
 const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
 
