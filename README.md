@@ -45,7 +45,7 @@ Built with:
 ---
 
 ##Join in my bot discord server if you have any questions
-link: https://discord.gg/pKtAvy2mPe
+link: https://discord.gg/pKtAvy2mPe / add bot to your discord server: [https://discord.com/oauth2/authorize?client_id=1471306586088800381&permissions=2147592192&integration_type=0&scope=applications.commands+bot](https://bit.ly/4rKYQIO)
 
 ###Execution Flow
 
