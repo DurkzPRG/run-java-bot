@@ -33,6 +33,7 @@ Built with:
 ##Features
 
 - `/run` slash command
+- `/clear` slash command
 - Java (OpenJDK — Judge0 ID 62)
 - 5-part modal editor (supports long code)
 - Automatic base64 encoding for safe transport
@@ -43,17 +44,19 @@ Built with:
 
 ---
 
-##Architecture
+##Join in my bot discord server if you have any questions
+link: https://discord.gg/pKtAvy2mPe
 
 ###Execution Flow
 
-1. User triggers `/run`
-2. Code is collected (inline or via modal)
-3. Source is base64 encoded
-4. Sent to Judge0 CE
-5. Bot polls for completion
-6. Output is formatted and returned
-7. Large output is automatically sent as file
+1. `(/run lang:Java code:your code here input:if you code need input), (/run lang:Java <- press ENTER and will show up modal editor, copy your code there)` 
+2. `(/clear amount:100) will clear your messages in your channel`
+3. Code is collected (inline or via modal)
+4. Source is base64 encoded
+5. Sent to Judge0 CE
+6. Bot polls for completion
+7. Output is formatted and returned
+8. Large output is automatically sent as file
 
 ---
 
