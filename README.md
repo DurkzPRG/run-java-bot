@@ -38,7 +38,7 @@ Built with:
 - Automatic base64 encoding for safe transport
 - Execution polling system with timeout control
 - Automatic large output export as `.txt`
-- Graceful handling of expired Discord interactions (Error 10062
+- Graceful handling of expired Discord interactions (Error 10062)
 - HTTP health-check server for Render
 
 ---
