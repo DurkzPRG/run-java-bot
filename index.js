@@ -10,10 +10,9 @@ const {
   TextInputStyle,
   ActionRowBuilder,
   AttachmentBuilder,
-  PermissionsBitField,
 } = require("discord.js");
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages] });
+const client = new Client({ intents: [GatewayIntentBits.Guilds] });
 
 const JUDGE0_BASE = "https://ce.judge0.com";
 
@@ -39,12 +38,40 @@ function stripCodeFences(s) {
   return m ? m[1] : s;
 }
 
+function sanitizeInvisible(s) {
+  if (!s) return s;
+  return s.replace(/[\u200B-\u200D\uFEFF]/g, "");
+}
+
 function isUnknownInteraction(err) {
   return err && (err.code === 10062 || err.rawError?.code === 10062);
 }
 
+async function safeReply(interaction, payload) {
+  try {
+    await interaction.reply(payload);
+    return true;
+  } catch (err) {
+    if (isUnknownInteraction(err)) return false;
+    throw err;
+  }
+}
+
 async function safeShowModal(interaction, modal) {
   try {
+    const okType = typeof interaction?.isChatInputCommand === "function" && interaction.isChatInputCommand();
+    const okFn = typeof interaction?.showModal === "function";
+
+    if (!okType || !okFn) {
+      try {
+        await safeReply(interaction, {
+          content: "Não consegui abrir o modal aqui. Tente usar o comando novamente.",
+          ephemeral: true,
+        });
+      } catch (_) {}
+      return false;
+    }
+
     await interaction.showModal(modal);
     return true;
   } catch (err) {
@@ -53,9 +80,9 @@ async function safeShowModal(interaction, modal) {
   }
 }
 
-async function safeDeferReply(interaction, ephemeral = false) {
+async function safeDeferReply(interaction) {
   try {
-    await interaction.deferReply({ ephemeral });
+    await interaction.deferReply();
     return true;
   } catch (err) {
     if (isUnknownInteraction(err)) return false;
@@ -73,22 +100,16 @@ async function safeEditReply(interaction, payload) {
   }
 }
 
-async function runOnJudge0(languageId, sourceCode, stdin) {
-  const body = {
-    language_id: languageId,
-    source_code: Buffer.from(sourceCode, "utf8").toString("base64"),
-    cpu_time_limit: CPU_TIME_LIMIT,
-    wall_time_limit: WALL_TIME_LIMIT,
-    memory_limit: MEMORY_LIMIT,
-  };
-
-  if (stdin !== undefined && stdin !== null) {
-    body.stdin = Buffer.from(String(stdin), "utf8").toString("base64");
-  }
-
+async function runOnJudge0(languageId, sourceCode) {
   const createRes = await axios.post(
     `${JUDGE0_BASE}/submissions?base64_encoded=true&wait=false`,
-    body
+    {
+      language_id: languageId,
+      source_code: Buffer.from(sourceCode, "utf8").toString("base64"),
+      cpu_time_limit: CPU_TIME_LIMIT,
+      wall_time_limit: WALL_TIME_LIMIT,
+      memory_limit: MEMORY_LIMIT,
+    }
   );
 
   const token = createRes.data.token;
@@ -167,32 +188,6 @@ function buildRunModal(lang) {
   return modal;
 }
 
-function buildInputModal(key) {
-  return new ModalBuilder()
-    .setCustomId(`run_input:${key}`)
-    .setTitle("Entrada do programa (stdin)")
-    .addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("stdin")
-          .setLabel("Cole a entrada (opcional). Ex: 10+2")
-          .setStyle(TextInputStyle.Paragraph)
-          .setRequired(false)
-          .setMaxLength(4000)
-      )
-    );
-}
-
-const pendingRuns = new Map();
-const PENDING_TTL_MS = 2 * 60 * 1000;
-
-function cleanupPending() {
-  const now = Date.now();
-  for (const [k, v] of pendingRuns) {
-    if (!v || now - v.createdAt > PENDING_TTL_MS) pendingRuns.delete(k);
-  }
-}
-
 process.on("unhandledRejection", (reason) => {
   console.error("unhandledRejection:", reason);
 });
@@ -210,80 +205,30 @@ client.once("clientReady", () => {
 });
 
 client.on("interactionCreate", async (interaction) => {
-  if (interaction.isChatInputCommand() && interaction.commandName === "clear") {
-    if (!interaction.inGuild()) {
-      try {
-        await interaction.reply({ content: "Use este comando em um servidor.", ephemeral: true });
-      } catch (err) {
-        if (!isUnknownInteraction(err)) throw err;
-      }
-      return;
-    }
-
-    const amount = interaction.options.getInteger("quantidade", true);
-
-    if (!interaction.memberPermissions?.has(PermissionsBitField.Flags.ManageMessages)) {
-      try {
-        await interaction.reply({ content: "Você não tem permissão para apagar mensagens.", ephemeral: true });
-      } catch (err) {
-        if (!isUnknownInteraction(err)) throw err;
-      }
-      return;
-    }
-
-    const me = interaction.guild.members.me;
-    if (!me?.permissions?.has(PermissionsBitField.Flags.ManageMessages)) {
-      try {
-        await interaction.reply({ content: "Eu não tenho permissão de **Gerenciar mensagens** aqui.", ephemeral: true });
-      } catch (err) {
-        if (!isUnknownInteraction(err)) throw err;
-      }
-      return;
-    }
-
-    const ok = await safeDeferReply(interaction, true);
-    if (!ok) return;
-
-    try {
-      const deleted = await interaction.channel.bulkDelete(amount, true);
-      await safeEditReply(interaction, `✅ Apaguei **${deleted.size}** mensagens.`);
-    } catch (err) {
-      await safeEditReply(
-        interaction,
-        "Não consegui apagar. Pode ter mensagens com mais de 14 dias ou faltou permissão."
-      );
-    }
-    return;
-  }
-
   if (interaction.isChatInputCommand() && interaction.commandName === "run") {
     const lang = interaction.options.getString("lang", true);
     const languageId = LANG[lang];
 
     if (!languageId) {
-      try {
-        await interaction.reply({ content: "Linguagem não suportada.", ephemeral: true });
-      } catch (err) {
-        if (!isUnknownInteraction(err)) throw err;
-      }
+      await safeReply(interaction, { content: "Linguagem não suportada.", ephemeral: true });
       return;
     }
 
     const codeRaw = interaction.options.getString("code", false);
-    const inputOpt = interaction.options.getString("input", false);
 
     if (!codeRaw || !codeRaw.trim()) {
       await safeShowModal(interaction, buildRunModal(lang));
       return;
     }
 
-    const code = stripCodeFences(codeRaw);
+    let code = stripCodeFences(codeRaw);
+    code = sanitizeInvisible(code);
 
     const ok = await safeDeferReply(interaction);
     if (!ok) return;
 
     try {
-      const result = await runOnJudge0(languageId, code, inputOpt ?? undefined);
+      const result = await runOnJudge0(languageId, code);
       const out = formatOutput(result);
       await replyOutput(interaction, out);
     } catch (err) {
@@ -302,11 +247,7 @@ client.on("interactionCreate", async (interaction) => {
     const languageId = LANG[lang];
 
     if (!languageId) {
-      try {
-        await interaction.reply({ content: "Linguagem não suportada.", ephemeral: true });
-      } catch (err) {
-        if (!isUnknownInteraction(err)) throw err;
-      }
+      await safeReply(interaction, { content: "Linguagem não suportada.", ephemeral: true });
       return;
     }
 
@@ -318,50 +259,19 @@ client.on("interactionCreate", async (interaction) => {
       interaction.fields.getTextInputValue("code5") || "",
     ];
 
-    const code = stripCodeFences(parts.join("\n").trim());
+    let code = stripCodeFences(parts.join("\n").trim());
+    code = sanitizeInvisible(code);
 
     if (!code) {
-      try {
-        await interaction.reply({ content: "Você não colou nenhum código.", ephemeral: true });
-      } catch (err) {
-        if (!isUnknownInteraction(err)) throw err;
-      }
+      await safeReply(interaction, { content: "Você não colou nenhum código.", ephemeral: true });
       return;
     }
-
-    cleanupPending();
-
-    const key = `${interaction.user.id}:${Date.now()}:${Math.random().toString(16).slice(2)}`;
-    pendingRuns.set(key, { userId: interaction.user.id, lang, languageId, code, createdAt: Date.now() });
-
-    await safeShowModal(interaction, buildInputModal(key));
-    return;
-  }
-
-  if (interaction.isModalSubmit() && interaction.customId.startsWith("run_input:")) {
-    cleanupPending();
-
-    const key = interaction.customId.slice("run_input:".length);
-    const pending = pendingRuns.get(key);
-
-    if (!pending || pending.userId !== interaction.user.id) {
-      try {
-        await interaction.reply({ content: "Esse run expirou. Rode o /run novamente.", ephemeral: true });
-      } catch (err) {
-        if (!isUnknownInteraction(err)) throw err;
-      }
-      return;
-    }
-
-    pendingRuns.delete(key);
-
-    const stdin = interaction.fields.getTextInputValue("stdin") || "";
 
     const ok = await safeDeferReply(interaction);
     if (!ok) return;
 
     try {
-      const result = await runOnJudge0(pending.languageId, pending.code, stdin);
+      const result = await runOnJudge0(languageId, code);
       const out = formatOutput(result);
       await replyOutput(interaction, out);
     } catch (err) {
@@ -374,7 +284,4 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
-process.on("unhandledRejection", (reason) => console.error("unhandledRejection:", reason));
-process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
-client.on("error", (err) => console.error("client error:", err));
 client.login(process.env.DISCORD_TOKEN);
