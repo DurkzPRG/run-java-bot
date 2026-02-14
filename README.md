@@ -45,7 +45,7 @@ Built with:
 ---
 
 ##Join in my bot discord server if you have any questions
-link: https://discord.gg/pKtAvy2mPe / add bot to your discord server: https://bit.ly/4rKYQIO
+link: https://discord.gg/pKtAvy2mPe / add bot to your discord server: [DiscordBotList](https://discord.ly/run-java)
 
 ###Execution Flow
 
