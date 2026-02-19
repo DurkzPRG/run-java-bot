@@ -1,4 +1,4 @@
-#Run Java — Discord Code Execution Bot
+# Run Java --- Advanced Discord Code Execution Bot
 
 ![Node](https://img.shields.io/badge/node-%3E%3D18-green)
 ![Discord.js](https://img.shields.io/badge/discord.js-v14-blue)
@@ -6,93 +6,185 @@
 ![Deploy](https://img.shields.io/badge/Deploy-Render-purple)
 ![License](https://img.shields.io/badge/license-MIT-lightgrey)
 ![Status](https://img.shields.io/badge/status-active-success)
-![Maintenance](https://img.shields.io/badge/maintained-yes-brightgreen)
-![PRs](https://img.shields.io/badge/PRs-welcome-blue)
-![Open Source](https://img.shields.io/badge/Open%20Source-Yes-ff69b4)
-![Made With](https://img.shields.io/badge/Made%20with-Node.js-339933?logo=node.js&logoColor=white)
 
-> A production-ready Discord bot that executes Java code in real time using the Judge0 sandbox API.
+Designed for educational servers, programming communities, and
+moderation-aware environments.
 
----
+A production-grade Discord bot that executes Java code securely using
+Judge0 and includes an advanced in-memory logging system.
 
-##Overview
+------------------------------------------------------------------------
 
-**Run Java** is a scalable Discord bot designed to execute Java code directly inside Discord using slash commands.
+# Overview
 
-It supports both short inline execution and large multi-part submissions through a modal editor, ensuring reliability even for extended code blocks.
+Run Java is a scalable and production-ready Discord bot that executes
+Java code directly inside Discord using slash commands.
+
+Core Capabilities:
+
+-   Inline code execution
+-   5-part modal editor for long code
+-   stdin (input) support
+-   Advanced logging system
+-   Admin-level log export
+-   Robust interaction error handling
+-   Large output auto-file export
 
 Built with:
 
-- Node.js
-- Discord.js v14
-- Judge0 CE API
-- Render deployment compatibility
+-   Node.js
+-   Discord.js v14
+-   Judge0 CE API
+-   Render-compatible HTTP health server
 
----
+------------------------------------------------------------------------
 
-##Features
+# Commands
 
-- `/run` slash command
-- `/clear` slash command
-- Java (OpenJDK — Judge0 ID 62)
-- 5-part modal editor (supports long code)
-- Automatic base64 encoding for safe transport
-- Execution polling system with timeout control
-- Automatic large output export as `.txt`
-- Graceful handling of expired Discord interactions (Error 10062)
-- HTTP health-check server for Render
+## /run
 
----
+Executes Java code via Judge0.
 
-##Join in my bot discord server if you have any questions
-link: https://discord.gg/pKtAvy2mPe / add bot to your discord server: [DiscordBotList](https://discord.ly/run-java)
+Options: - lang (required) - code (optional) - input (optional stdin)
 
-###Execution Flow
+If no code is provided, a 5-part modal editor opens automatically.
 
-1. `(/run lang:Java code:your code here input:if you code need input), (/run lang:Java <- press ENTER and will show up modal editor, copy your code there)` 
-2. `(/clear amount:100) will clear your messages in your channel`
-3. Code is collected (inline or via modal)
-4. Source is base64 encoded
-5. Sent to Judge0 CE
-6. Bot polls for completion
-7. Output is formatted and returned
-8. Large output is automatically sent as file
+------------------------------------------------------------------------
 
----
+## /clear
 
-##Security Model
+Deletes 1--100 messages from the current channel.
 
--Code execution occurs inside Judge0 sandbox
+Requirements: - Bot must have Manage Messages - Messages older than 14
+days cannot be deleted
 
--Strict CPU, memory, and wall-time limit
+------------------------------------------------------------------------
 
--Base64 encoding for integrity
+## /help
 
--Safe handling of expired Discord interactions
+Displays an embed with all available commands.
 
--Output length protection
+------------------------------------------------------------------------
 
----
+## /setlogs
 
-#License
+Sets the channel where /genlog will send the JSON log file.
+
+Requirements: - Administrator permission
+
+------------------------------------------------------------------------
+
+## /genlog
+
+Generates a .json file containing:
+
+-   Message creations
+-   Message edits
+-   Message deletions
+-   Command usage
+-   Modal submissions
+
+Requirements: - Administrator permission - /setlogs must be configured
+first
+
+Logs are stored in memory and reset when the bot restarts.
+
+------------------------------------------------------------------------
+
+# Execution Flow
+
+1.  User runs /run
+2.  Code collected (inline or modal)
+3.  Invisible characters sanitized
+4.  Code + stdin encoded to base64
+5.  Submission sent to Judge0
+6.  Polling system checks status
+7.  Output decoded
+8.  Response returned (or sent as .txt if too large)
+
+------------------------------------------------------------------------
+
+# Security Model
+
+-   Code execution happens in Judge0 sandbox
+-   CPU time limit configurable
+-   Wall time limit configurable
+-   Memory limit configurable
+-   Output size protection
+-   Base64 encoding for transport safety
+-   Expired interaction handling (Error 10062 safe)
+-   Graceful error recovery
+-   Logging channel auto-skip to avoid recursion
+
+------------------------------------------------------------------------
+
+# Environment Variables
+
+``` env
+DISCORD_TOKEN=
+CLIENT_ID=
+GUILD_ID= (optional for guild-only commands)
+
+CPU_TIME_LIMIT=5
+WALL_TIME_LIMIT=8
+MEMORY_LIMIT=256000
+
+POLL_INTERVAL_MS=700
+POLL_MAX_TRIES=60
+
+MAX_EVENTS_PER_GUILD=20000
+MAX_CONTENT_CHARS=1000
+```
+
+------------------------------------------------------------------------
+
+# Deployment
+
+Compatible with:
+
+-   Render
+-   Railway
+-   VPS
+-   Docker
+-   Any Node 18+ environment
+
+Includes health-check server support.
+
+------------------------------------------------------------------------
+
+# Known Limitation
+
+Since the bot uses the public Judge0 service:
+
+-   /run may timeout during congestion
+-   Other commands will continue working normally
+
+If /run times out, wait a few minutes and try again.
+
+------------------------------------------------------------------------
+
+# Why This Bot Is Different
+
+Unlike simple Judge0 wrappers, this bot includes:
+
+-   Advanced interaction safety layer
+-   Full message lifecycle logging
+-   Admin-exportable audit logs
+-   Large output auto-file system
+-   Modal multi-part editor
+-   Configurable runtime limits
+-   Production-grade error handling
+
+------------------------------------------------------------------------
+
+# License
 
 MIT License
 
----
+------------------------------------------------------------------------
 
-*Heads up
+# Contribution
 
-Since the bot uses the public Judge0 service, sometimes the /run command can get congested and may timeout.
+Pull requests are welcome.
 
-If that happens, don’t freak out it’s not a bug in the bot. The external Judge0 servers are just busy at the moment.
-
-/clear will still work normally.
-
-If /run times out, just wait a few minutes and try again
-Thanks for your patience!
-
-#Contribution
-
--Pull requests are welcome.
-
--Feel free to fork, improve, and build on top of this project.
+Feel free to fork, improve, and build on top of this project.
