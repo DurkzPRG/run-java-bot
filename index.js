@@ -12,8 +12,6 @@ const {
   ActionRowBuilder,
   AttachmentBuilder,
   PermissionFlagsBits,
-  ChannelType,
-  EmbedBuilder,
 } = require("discord.js");
 
 const client = new Client({
@@ -26,6 +24,7 @@ const client = new Client({
 });
 
 const JUDGE0_BASE = "https://ce.judge0.com";
+
 const LANG = { java: 62 };
 
 const CPU_TIME_LIMIT = Number(process.env.CPU_TIME_LIMIT || 5);
@@ -71,6 +70,10 @@ function isUnknownInteraction(err) {
   return err && (err.code === 10062 || err.rawError?.code === 10062);
 }
 
+function isAlreadyAcknowledged(err) {
+  return err && (err.code === 40060 || err.rawError?.code === 40060);
+}
+
 async function safeReply(interaction, payload) {
   try {
     if (interaction.deferred) {
@@ -85,6 +88,31 @@ async function safeReply(interaction, payload) {
     return true;
   } catch (err) {
     if (isUnknownInteraction(err)) return false;
+    if (isAlreadyAcknowledged(err)) return true;
+    throw err;
+  }
+}
+
+async function safeShowModal(interaction, modal) {
+  try {
+    const okType =
+      typeof interaction?.isChatInputCommand === "function" && interaction.isChatInputCommand();
+    const okFn = typeof interaction?.showModal === "function";
+
+    if (!okType || !okFn) {
+      try {
+        await safeReply(interaction, {
+          content: "Não consegui abrir o modal aqui. Tente usar o comando novamente.",
+          ephemeral: true,
+        });
+      } catch {}
+      return false;
+    }
+
+    await interaction.showModal(modal);
+    return true;
+  } catch (err) {
+    if (isUnknownInteraction(err)) return false;
     throw err;
   }
 }
@@ -96,6 +124,7 @@ async function safeDeferReply(interaction, ephemeral = true) {
     return true;
   } catch (err) {
     if (isUnknownInteraction(err)) return false;
+    if (isAlreadyAcknowledged(err)) return true;
     throw err;
   }
 }
@@ -103,26 +132,6 @@ async function safeDeferReply(interaction, ephemeral = true) {
 async function safeEditReply(interaction, payload) {
   try {
     await interaction.editReply(payload);
-    return true;
-  } catch (err) {
-    if (isUnknownInteraction(err)) return false;
-    throw err;
-  }
-}
-
-async function safeShowModal(interaction, modal) {
-  try {
-    const okType =
-      typeof interaction?.isChatInputCommand === "function" && interaction.isChatInputCommand();
-    const okFn = typeof interaction?.showModal === "function";
-    if (!okType || !okFn) {
-      await safeReply(interaction, {
-        content: "Não consegui abrir o modal aqui. Tente usar o comando novamente.",
-        ephemeral: true,
-      });
-      return false;
-    }
-    await interaction.showModal(modal);
     return true;
   } catch (err) {
     if (isUnknownInteraction(err)) return false;
@@ -296,18 +305,205 @@ function buildRunModal(lang) {
   return modal;
 }
 
-process.on("unhandledRejection", (reason) => console.error(reason));
-process.on("uncaughtException", (err) => console.error(err));
-client.on("error", (err) => console.error(err));
+process.on("unhandledRejection", (reason) => console.error("unhandledRejection:", reason));
+process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
+client.on("error", (err) => console.error("client error:", err));
 
 client.once("ready", () => {
-  console.log(`Bot online: ${client.user?.tag}`);
+  console.log(`Bot online: ${client.user.tag}`);
 });
 
 client.on("interactionCreate", async (interaction) => {
+  if (interaction.isChatInputCommand()) {
+    const name = interaction.commandName;
+
+    if (name === "setlogs") {
+      if (!interaction.inGuild()) {
+        await safeReply(interaction, { content: "Esse comando só funciona em servidores.", ephemeral: true });
+        return;
+      }
+
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+        await safeReply(interaction, { content: "Apenas administradores podem usar esse comando.", ephemeral: true });
+        return;
+      }
+
+      const ch = interaction.options.getChannel("channel", true);
+      logChannelByGuild.set(interaction.guildId, ch.id);
+
+      await safeReply(interaction, { content: `✅ Canal de logs definido: ${ch}`, ephemeral: true });
+      return;
+    }
+
+    if (name === "help") {
+      const { EmbedBuilder } = require("discord.js");
+
+      const embed = new EmbedBuilder()
+          .setTitle("📖 Bot Commands")
+          .setDescription("Here are the available commands:")
+          .addFields(
+              {
+                name: "💻 /run",
+                value: "Executes code (currently Java) using Judge0.\nYou can paste the code directly or use the modal.",
+              },
+              {
+                name: "🧹 /clear",
+                value: "Deletes up to 100 messages from the current channel.\nRequires Manage Messages permission.",
+              },
+              {
+                name: "📝 /setlogs",
+                value: "Defines the channel where the bot will send the file generated by /genlog.\nAdministrators only.",
+              },
+              {
+                name: "📦 /genlog",
+                value: "Generates a .json file containing the log collected since the bot was started.\nAdministrators only.",
+              },
+              {
+                name: "ℹ️ /help",
+                value: "Displays this help message.",
+              }
+          )
+          .setFooter({ text: "The logging system is temporary and resets when the bot restarts." })
+          .setTimestamp();
+
+      await interaction.reply({ embeds: [embed], ephemeral: true });
+      return;
+    }
+
+    if (name === "genlog") {
+      if (!interaction.inGuild()) {
+        await safeReply(interaction, { content: "Esse comando só funciona em servidores.", ephemeral: true });
+        return;
+      }
+
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+        await safeReply(interaction, { content: "Apenas administradores podem usar esse comando.", ephemeral: true });
+        return;
+      }
+
+      const logChannelId = logChannelByGuild.get(interaction.guildId);
+      if (!logChannelId) {
+        await safeReply(interaction, { content: "❌ Use /setlogs primeiro.", ephemeral: true });
+        return;
+      }
+
+      const ok = await safeDeferReply(interaction, true);
+      if (!ok) return;
+
+      const logCh = interaction.guild.channels.cache.get(logChannelId);
+      if (!logCh || typeof logCh.send !== "function") {
+        await safeEditReply(interaction, { content: "❌ Não consegui acessar o canal de logs configurado." });
+        return;
+      }
+
+      const events = ensureGuildEvents(interaction.guildId);
+      const payload = {
+        guildId: interaction.guildId,
+        generatedAt: nowIso(),
+        generatedBy: { userId: interaction.user.id, userTag: interaction.user.tag },
+        totalEvents: events.length,
+        events,
+      };
+
+      const jsonText = JSON.stringify(payload, null, 2);
+      const file = new AttachmentBuilder(Buffer.from(jsonText, "utf8"), {
+        name: `log-${interaction.guildId}.json`,
+      });
+
+      await logCh.send({
+        content: `📎 Log gerado por <@${interaction.user.id}> • eventos: **${events.length}**`,
+        files: [file],
+      });
+
+      await safeEditReply(interaction, { content: "✅ Log gerado e enviado." });
+      return;
+    }
+
+    if (name === "clear") {
+      const rawAmount = interaction.options.getInteger("amount");
+      const amount = clampInt(rawAmount ?? 5, 1, 100);
+
+      const ok = await safeDeferReply(interaction, true);
+      if (!ok) return;
+
+      try {
+        if (!interaction.inGuild()) {
+          await safeEditReply(interaction, "This command only works in servers.");
+          return;
+        }
+
+        const channel = interaction.channel;
+        if (!channel || typeof channel.bulkDelete !== "function") {
+          await safeEditReply(interaction, "I can't access this channel.");
+          return;
+        }
+
+        const me = interaction.guild.members.me;
+        if (!me) {
+          await safeEditReply(interaction, "Couldn't resolve bot permissions.");
+          return;
+        }
+
+        const perms = channel.permissionsFor(me);
+        if (!perms || !perms.has(PermissionFlagsBits.ManageMessages)) {
+          await safeEditReply(interaction, "Missing permission: Manage Messages.");
+          return;
+        }
+
+        const deleted = await channel.bulkDelete(amount, true);
+
+        await safeEditReply(
+          interaction,
+          `Cleared ${deleted.size} message(s). (Older than 14 days can't be deleted.)`
+        );
+      } catch (err) {
+        await safeEditReply(interaction, "Error while deleting messages:\n" + (err?.message || "unknown"));
+      }
+
+      return;
+    }
+
+    if (name === "run") {
+      const lang = interaction.options.getString("lang", true);
+      const languageId = LANG[lang];
+
+      if (!languageId) {
+        await safeReply(interaction, { content: "Linguagem não suportada.", ephemeral: true });
+        return;
+      }
+
+      const codeRaw = interaction.options.getString("code", false);
+      const inputRaw = interaction.options.getString("input", false);
+
+      if (!codeRaw || !codeRaw.trim()) {
+        await safeShowModal(interaction, buildRunModal(lang));
+        return;
+      }
+
+      const code = sanitizeInvisible(stripCodeFences(codeRaw));
+      const stdin = inputRaw ? sanitizeInvisible(inputRaw) : "";
+
+      const ok = await safeDeferReply(interaction, true);
+      if (!ok) return;
+
+      try {
+        const result = await runOnJudge0(languageId, code, stdin);
+        const out = formatOutput(result);
+        await replyOutput(interaction, out);
+      } catch (err) {
+        const details =
+          err?.response?.data ? JSON.stringify(err.response.data, null, 2) : (err?.message || "desconhecido");
+        await replyOutput(interaction, "Erro ao executar.\n\n" + details);
+      }
+
+      return;
+    }
+  }
+
   if (interaction.isModalSubmit() && interaction.customId.startsWith("run_modal:")) {
     const lang = interaction.customId.split(":")[1];
     const languageId = LANG[lang];
+
     if (!languageId) {
       await safeReply(interaction, { content: "Linguagem não suportada.", ephemeral: true });
       return;
@@ -322,6 +518,7 @@ client.on("interactionCreate", async (interaction) => {
     ];
 
     const code = sanitizeInvisible(stripCodeFences(parts.join("\n").trim()));
+
     if (!code) {
       await safeReply(interaction, { content: "Você não colou nenhum código.", ephemeral: true });
       return;
@@ -332,95 +529,13 @@ client.on("interactionCreate", async (interaction) => {
 
     try {
       const result = await runOnJudge0(languageId, code, "");
-      await replyOutput(interaction, formatOutput(result));
+      const out = formatOutput(result);
+      await replyOutput(interaction, out);
     } catch (err) {
       const details =
         err?.response?.data ? JSON.stringify(err.response.data, null, 2) : (err?.message || "desconhecido");
       await replyOutput(interaction, "Erro ao executar.\n\n" + details);
     }
-    return;
-  }
-
-  if (!interaction.isChatInputCommand()) return;
-
-  const name = interaction.commandName;
-
-  if (name === "help") {
-    const embed = new EmbedBuilder()
-      .setTitle("📖 Bot Commands")
-      .setDescription("Here are the available commands:")
-      .addFields(
-        { name: "💻 /run", value: "Executes Java code using Judge0." },
-        { name: "🧹 /clear", value: "Deletes up to 100 messages." },
-        { name: "📝 /setlogs", value: "Sets the log channel." },
-        { name: "📦 /genlog", value: "Generates a JSON log file." },
-        { name: "ℹ️ /help", value: "Display this message" }
-      )
-      .setTimestamp();
-
-    await safeReply(interaction, { embeds: [embed], ephemeral: true });
-    return;
-  }
-
-  if (name === "clear") {
-    const rawAmount = interaction.options.getInteger("amount");
-    const amount = clampInt(rawAmount ?? 5, 1, 100);
-
-    const ok = await safeDeferReply(interaction, true);
-    if (!ok) return;
-
-    try {
-      if (!interaction.inGuild()) {
-        await safeEditReply(interaction, "Esse comando só funciona em servidores.");
-        return;
-      }
-
-      const channel = interaction.channel;
-      const me = interaction.guild.members.me;
-      const perms = me ? channel.permissionsFor(me) : null;
-
-      if (!perms || !perms.has(PermissionFlagsBits.ManageMessages)) {
-        await safeEditReply(interaction, "Faltando permissão: Manage Messages.");
-        return;
-      }
-
-      const deleted = await channel.bulkDelete(amount, true);
-      await safeEditReply(interaction, `🧹 Apaguei ${deleted.size} mensagem(ns).`);
-    } catch (err) {
-      await safeEditReply(interaction, "Erro ao apagar mensagens.");
-    }
-    return;
-  }
-
-  if (name === "run") {
-    const lang = interaction.options.getString("lang", true);
-    const languageId = LANG[lang];
-    if (!languageId) {
-      await safeReply(interaction, { content: "Linguagem não suportada.", ephemeral: true });
-      return;
-    }
-
-    const codeRaw = interaction.options.getString("code", false);
-    const inputRaw = interaction.options.getString("input", false);
-
-    if (!codeRaw || !codeRaw.trim()) {
-      await safeShowModal(interaction, buildRunModal(lang));
-      return;
-    }
-
-    const code = sanitizeInvisible(stripCodeFences(codeRaw));
-    const stdin = inputRaw ? sanitizeInvisible(inputRaw) : "";
-
-    const ok = await safeDeferReply(interaction, true);
-    if (!ok) return;
-
-    try {
-      const result = await runOnJudge0(languageId, code, stdin);
-      await replyOutput(interaction, formatOutput(result));
-    } catch (err) {
-      await replyOutput(interaction, "Erro ao executar.");
-    }
-    return;
   }
 });
 
