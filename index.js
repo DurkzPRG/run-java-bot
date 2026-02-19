@@ -388,8 +388,8 @@ process.on("unhandledRejection", (reason) => console.error("unhandledRejection:"
 process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
 client.on("error", (err) => console.error("client error:", err));
 
-client.once("ready", () => {
-  console.log(`Bot online: ${client.user.tag}`);
+client.once("clientReady", () => {
+  console.log(`Bot online as ${client.user.tag}`);
 });
 
 client.on("interactionCreate", async (interaction) => {
