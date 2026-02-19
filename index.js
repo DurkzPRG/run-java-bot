@@ -516,49 +516,61 @@ client.on("interactionCreate", async (interaction) => {
       return;
     }
 
-    if (name === "clear") {
-      const rawAmount = interaction.options.getInteger("amount");
-      const amount = clampInt(rawAmount ?? 5, 1, 100);
+if (name === "clear") {
+  if (!interaction.inGuild()) {
+    await safeReply(interaction, { content: "This command only works in servers.", ephemeral: true });
+    return;
+  }
 
-      const ok = await safeDeferReply(interaction, true);
-      if (!ok) return;
+  if (
+    !interaction.memberPermissions?.has(PermissionFlagsBits.ManageMessages) &&
+    !interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)
+  ) {
+    await safeReply(interaction, {
+      content: "❌ Only moderators or administrators can use this command.",
+      ephemeral: true,
+    });
+    return;
+  }
 
-      try {
-        if (!interaction.inGuild()) {
-          await safeEditReply(interaction, "This command only works in servers.");
-          return;
-        }
+  const rawAmount = interaction.options.getInteger("amount");
+  const amount = clampInt(rawAmount ?? 5, 1, 100);
 
-        const channel = interaction.channel;
-        if (!channel || typeof channel.bulkDelete !== "function") {
-          await safeEditReply(interaction, "I can't access this channel.");
-          return;
-        }
+  const ok = await safeDeferReply(interaction, true);
+  if (!ok) return;
 
-        const me = interaction.guild.members.me;
-        if (!me) {
-          await safeEditReply(interaction, "Couldn't resolve bot permissions.");
-          return;
-        }
-
-        const perms = channel.permissionsFor(me);
-        if (!perms || !perms.has(PermissionFlagsBits.ManageMessages)) {
-          await safeEditReply(interaction, "Missing permission: Manage Messages.");
-          return;
-        }
-
-        const deleted = await channel.bulkDelete(amount, true);
-
-        await safeEditReply(
-          interaction,
-          `Cleared ${deleted.size} message(s). (Older than 14 days can't be deleted.)`
-        );
-      } catch (err) {
-        await safeEditReply(interaction, "Error while deleting messages:\n" + (err?.message || "unknown"));
-      }
-
+  try {
+    const channel = interaction.channel;
+    if (!channel || typeof channel.bulkDelete !== "function") {
+      await safeEditReply(interaction, "I can't access this channel.");
       return;
     }
+
+    const me = interaction.guild.members.me;
+    if (!me) {
+      await safeEditReply(interaction, "Couldn't resolve bot permissions.");
+      return;
+    }
+
+    const perms = channel.permissionsFor(me);
+    if (!perms || !perms.has(PermissionFlagsBits.ManageMessages)) {
+      await safeEditReply(interaction, "Missing permission: Manage Messages.");
+      return;
+    }
+
+    const deleted = await channel.bulkDelete(amount, true);
+
+    await safeEditReply(
+      interaction,
+      `Cleared ${deleted.size} message(s). (Older than 14 days can't be deleted.)`
+    );
+  } catch (err) {
+    await safeEditReply(interaction, "Error while deleting messages:\n" + (err?.message || "unknown"));
+  }
+
+  return;
+}
+
 
     if (name === "run") {
       const lang = interaction.options.getString("lang", true);
