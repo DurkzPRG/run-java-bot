@@ -1,5 +1,12 @@
 require("dotenv").config();
 const { REST, Routes, SlashCommandBuilder } = require("discord.js");
+const {
+  REST,
+  Routes,
+  SlashCommandBuilder,
+  PermissionFlagsBits,
+  ChannelType,
+} = require("discord.js");
 
 const commands = [
   new SlashCommandBuilder()
@@ -29,6 +36,7 @@ const commands = [
   new SlashCommandBuilder()
     .setName("clear")
     .setDescription("Apaga as últimas N mensagens do canal (até 100).")
+    .setDescription("Apaga as últimas X mensagens do canal (até 100).")
     .addIntegerOption((opt) =>
       opt
         .setName("amount")
@@ -37,6 +45,31 @@ const commands = [
         .setMinValue(1)
         .setMaxValue(100)
     )
+
+    .toJSON(),
+
+  new SlashCommandBuilder()
+      .setName("help")
+      .setDescription("Mostra todos os comandos disponíveis do bot.")
+      .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName("setlogs")
+    .setDescription("Define o canal onde o bot vai enviar o arquivo do /genlog.")
+    .addChannelOption((opt) =>
+      opt
+        .setName("channel")
+        .setDescription("Canal de logs")
+        .setRequired(true)
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)
+    )
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
+    .toJSON(),
+
+  new SlashCommandBuilder()
+    .setName("genlog")
+    .setDescription("Gera um .json com o log desde que o bot foi ligado.")
+    .setDefaultMemberPermissions(PermissionFlagsBits.Administrator)
     .toJSON(),
 ];
 
@@ -54,6 +87,7 @@ const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
       : Routes.applicationCommands(clientId);
 
     console.log(guildId ? "Registrando comandos (guild)..." : "Registrando comandos (global)...");
+
     await rest.put(route, { body: commands });
     console.log("Comandos registrados!");
   } catch (err) {

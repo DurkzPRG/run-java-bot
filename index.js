@@ -5,20 +5,31 @@ const axios = require("axios");
 const {
   Client,
   GatewayIntentBits,
+  Partials,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
   ActionRowBuilder,
   AttachmentBuilder,
+
 } = require("discord.js");
 
 const client = new Client({ intents: [GatewayIntentBits.Guilds] });
+  PermissionFlagsBits,
+} = require("discord.js");
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+  partials: [Partials.Message, Partials.Channel],
+});
 
 const JUDGE0_BASE = "https://ce.judge0.com";
 
-const LANG = {
-  java: 62,
-};
+const LANG = { java: 62 };
 
 const CPU_TIME_LIMIT = Number(process.env.CPU_TIME_LIMIT || 5);
 const WALL_TIME_LIMIT = Number(process.env.WALL_TIME_LIMIT || 8);
@@ -26,6 +37,16 @@ const MEMORY_LIMIT = Number(process.env.MEMORY_LIMIT || 256000);
 
 const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 700);
 const POLL_MAX_TRIES = Number(process.env.POLL_MAX_TRIES || 60);
+
+const MAX_EVENTS_PER_GUILD = Number(process.env.MAX_EVENTS_PER_GUILD || 20000);
+const MAX_CONTENT_CHARS = Number(process.env.MAX_CONTENT_CHARS || 1000);
+
+const logChannelByGuild = new Map();
+const eventsByGuild = new Map();
+
+function nowIso() {
+  return new Date().toISOString();
+}
 
 function sleep(ms) {
   return new Promise((r) => setTimeout(r, ms));
@@ -55,6 +76,14 @@ function isUnknownInteraction(err) {
 
 async function safeReply(interaction, payload) {
   try {
+    if (interaction.deferred) {
+      await interaction.editReply(payload);
+      return true;
+    }
+    if (interaction.replied) {
+      await interaction.followUp(payload);
+      return true;
+    }
     await interaction.reply(payload);
     return true;
   } catch (err) {
@@ -76,6 +105,7 @@ async function safeShowModal(interaction, modal) {
           ephemeral: true,
         });
       } catch (_) {}
+      } catch {}
       return false;
     }
 
@@ -90,6 +120,10 @@ async function safeShowModal(interaction, modal) {
 async function safeDeferReply(interaction) {
   try {
     await interaction.deferReply();
+async function safeDeferReply(interaction, ephemeral = true) {
+  try {
+    if (interaction.deferred || interaction.replied) return true;
+    await interaction.deferReply({ ephemeral });
     return true;
   } catch (err) {
     if (isUnknownInteraction(err)) return false;
@@ -106,6 +140,84 @@ async function safeEditReply(interaction, payload) {
     throw err;
   }
 }
+
+function ensureGuildEvents(guildId) {
+  if (!eventsByGuild.has(guildId)) eventsByGuild.set(guildId, []);
+  return eventsByGuild.get(guildId);
+}
+
+function pushEvent(guildId, evt) {
+  const arr = ensureGuildEvents(guildId);
+  arr.push(evt);
+  if (arr.length > MAX_EVENTS_PER_GUILD) {
+    arr.splice(0, arr.length - MAX_EVENTS_PER_GUILD);
+  }
+}
+
+function clipContent(s) {
+  if (s == null) return null;
+  const t = String(s);
+  return t.length > MAX_CONTENT_CHARS ? t.slice(0, MAX_CONTENT_CHARS) : t;
+}
+
+function baseMsgEvent(type, message) {
+  return {
+    type,
+    iso: nowIso(),
+    ts: Date.now(),
+    guildId: message.guild?.id ?? null,
+    channelId: message.channel?.id ?? null,
+    channelName: message.channel?.name ?? null,
+    messageId: message.id ?? null,
+    authorId: message.author?.id ?? null,
+    authorTag: message.author?.tag ?? null,
+    authorIsBot: Boolean(message.author?.bot),
+    content: clipContent(message.content ?? null),
+  };
+}
+
+function shouldSkipLogging(message) {
+  if (!message?.guild) return true;
+  const logCh = logChannelByGuild.get(message.guild.id);
+  return Boolean(logCh && message.channel?.id === logCh);
+}
+
+client.on("messageCreate", (message) => {
+  if (shouldSkipLogging(message)) return;
+  pushEvent(message.guild.id, baseMsgEvent("messageCreate", message));
+});
+
+client.on("messageUpdate", async (oldMsg, newMsg) => {
+  try {
+    if (oldMsg.partial) oldMsg = await oldMsg.fetch().catch(() => oldMsg);
+    if (newMsg.partial) newMsg = await newMsg.fetch().catch(() => newMsg);
+    if (!newMsg?.guild) return;
+
+    const logCh = logChannelByGuild.get(newMsg.guild.id);
+    if (logCh && newMsg.channel?.id === logCh) return;
+
+    const before = oldMsg?.content ?? null;
+    const after = newMsg?.content ?? null;
+    if (before === after) return;
+
+    const evt = baseMsgEvent("messageUpdate", newMsg);
+    evt.before = clipContent(before);
+    evt.after = clipContent(after);
+    pushEvent(newMsg.guild.id, evt);
+  } catch {}
+});
+
+client.on("messageDelete", async (message) => {
+  try {
+    if (message.partial) message = await message.fetch().catch(() => message);
+    if (!message?.guild) return;
+
+    const logCh = logChannelByGuild.get(message.guild.id);
+    if (logCh && message.channel?.id === logCh) return;
+
+    pushEvent(message.guild.id, baseMsgEvent("messageDelete", message));
+  } catch {}
+});
 
 async function runOnJudge0(languageId, sourceCode, stdinText) {
   const payload = {
@@ -166,7 +278,7 @@ async function replyOutput(interaction, text) {
   const file = new AttachmentBuilder(Buffer.from(text, "utf8"), { name: "output.txt" });
 
   await safeEditReply(interaction, {
-    content: "Saída grande — enviei como arquivo:",
+    content: "Saída grande. Enviado como arquivo:",
     files: [file],
   });
 }
@@ -187,11 +299,11 @@ function buildRunModal(lang) {
     );
 
   modal.addComponents(
-    field("code1", "Código (parte 1/5)"),
-    field("code2", "Código (parte 2/5)"),
-    field("code3", "Código (parte 3/5)"),
-    field("code4", "Código (parte 4/5)"),
-    field("code5", "Código (parte 5/5)")
+    field("code1", "Código/Code (part 1/5)"),
+    field("code2", "Código/Code (part 2/5)"),
+    field("code3", "Código/Code (part 3/5)"),
+    field("code4", "Código/Code (part 4/5)"),
+    field("code5", "Código/Code (part 5/5)")
   );
 
   return modal;
@@ -202,6 +314,7 @@ process.on("uncaughtException", (err) => console.error("uncaughtException:", err
 client.on("error", (err) => console.error("client error:", err));
 
 client.once("clientReady", () => {
+client.once("ready", () => {
   console.log(`Bot online: ${client.user.tag}`);
 });
 
@@ -262,16 +375,184 @@ client.on("interactionCreate", async (interaction) => {
     const codeRaw = interaction.options.getString("code", false);
     const inputRaw = interaction.options.getString("input", false);
 
-    if (!codeRaw || !codeRaw.trim()) {
-      await safeShowModal(interaction, buildRunModal(lang));
+  if (interaction.isChatInputCommand()) {
+    if (interaction.inGuild()) {
+      const evt = {
+        type: "command",
+        iso: nowIso(),
+        ts: Date.now(),
+        guildId: interaction.guildId,
+        channelId: interaction.channelId,
+        commandName: interaction.commandName,
+        userId: interaction.user.id,
+        userTag: interaction.user.tag,
+        options:
+          interaction.options?.data?.map((o) => ({
+            name: o.name,
+            value: o.value ?? null,
+          })) ?? [],
+      };
+
+      pushEvent(interaction.guildId, evt);
+    }
+
+    const name = interaction.commandName;
+
+    if (name === "setlogs") {
+      if (!interaction.inGuild()) {
+        await safeReply(interaction, { content: "Esse comando só funciona em servidores.", ephemeral: true });
+        return;
+      }
+
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+        await safeReply(interaction, { content: "Apenas administradores podem usar esse comando.", ephemeral: true });
+        return;
+      }
+
+      const ch = interaction.options.getChannel("channel", true);
+      logChannelByGuild.set(interaction.guildId, ch.id);
+
+      await safeReply(interaction, { content: `✅ Canal de logs definido: ${ch}`, ephemeral: true });
+      return;
+    }
+
+    if (name === "help") {
+      const { EmbedBuilder } = require("discord.js");
+
+      const embed = new EmbedBuilder()
+          .setTitle("📖 Bot Commands")
+          .setDescription("Here are the available commands:")
+          .addFields(
+              {
+                name: "💻 /run",
+                value: "Executes code (currently Java) using Judge0.\nYou can paste the code directly or use the modal.",
+              },
+              {
+                name: "🧹 /clear",
+                value: "Deletes up to 100 messages from the current channel.\nRequires Manage Messages permission.",
+              },
+              {
+                name: "📝 /setlogs",
+                value: "Defines the channel where the bot will send the file generated by /genlog.\nAdministrators only.",
+              },
+              {
+                name: "📦 /genlog",
+                value: "Generates a .json file containing the log collected since the bot was started.\nAdministrators only.",
+              },
+              {
+                name: "ℹ️ /help",
+                value: "Displays this help message.",
+              }
+          )
+          .setFooter({ text: "The logging system is temporary and resets when the bot restarts." })
+          .setTimestamp();
+
+      await safeReply(interaction, { embeds: [embed], ephemeral: true });
+      return;
+    }
+
+    if (name === "genlog") {
+      if (!interaction.inGuild()) {
+        await safeReply(interaction, { content: "Esse comando só funciona em servidores.", ephemeral: true });
+        return;
+      }
+
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+        await safeReply(interaction, { content: "Apenas administradores podem usar esse comando.", ephemeral: true });
+        return;
+      }
+
+      const logChannelId = logChannelByGuild.get(interaction.guildId);
+      if (!logChannelId) {
+        await safeReply(interaction, { content: "❌ Use /setlogs primeiro.", ephemeral: true });
+        return;
+      }
+
+      const ok = await safeDeferReply(interaction, true);
+      if (!ok) return;
+
+      const logCh = interaction.guild.channels.cache.get(logChannelId);
+      if (!logCh || typeof logCh.send !== "function") {
+        await safeEditReply(interaction, { content: "❌ Não consegui acessar o canal de logs configurado." });
+        return;
+      }
+
+      const events = ensureGuildEvents(interaction.guildId);
+      const payload = {
+        guildId: interaction.guildId,
+        generatedAt: nowIso(),
+        generatedBy: { userId: interaction.user.id, userTag: interaction.user.tag },
+        totalEvents: events.length,
+        events,
+      };
+
+      const jsonText = JSON.stringify(payload, null, 2);
+      const file = new AttachmentBuilder(Buffer.from(jsonText, "utf8"), {
+        name: `log-${interaction.guildId}.json`,
+      });
+
+      await logCh.send({
+        content: `📎 Log gerado por <@${interaction.user.id}> • eventos: **${events.length}**`,
+        files: [file],
+      });
+
+      await safeEditReply(interaction, { content: "✅ Log gerado e enviado." });
+      return;
+    }
+
+    if (name === "clear") {
+      const rawAmount = interaction.options.getInteger("amount");
+      const amount = clampInt(rawAmount ?? 5, 1, 100);
+
+      const ok = await safeDeferReply(interaction, true);
+      if (!ok) return;
+
+      try {
+        if (!interaction.inGuild()) {
+          await safeEditReply(interaction, "This command only works in servers.");
+          return;
+        }
+
+        const channel = interaction.channel;
+        if (!channel || typeof channel.bulkDelete !== "function") {
+          await safeEditReply(interaction, "I can't access this channel.");
+          return;
+        }
+
+        const me = interaction.guild.members.me;
+        if (!me) {
+          await safeEditReply(interaction, "Couldn't resolve bot permissions.");
+          return;
+        }
+
+        const perms = channel.permissionsFor(me);
+        if (!perms || !perms.has(PermissionFlagsBits.ManageMessages)) {
+          await safeEditReply(interaction, "Missing permission: Manage Messages.");
+          return;
+        }
+
+        const deleted = await channel.bulkDelete(amount, true);
+
+        await safeEditReply(
+          interaction,
+          `Cleared ${deleted.size} message(s). (Older than 14 days can't be deleted.)`
+        );
+      } catch (err) {
+        await safeEditReply(interaction, "Error while deleting messages:\n" + (err?.message || "unknown"));
+      }
+
       return;
     }
 
     let code = sanitizeInvisible(stripCodeFences(codeRaw));
     const stdin = inputRaw ? sanitizeInvisible(inputRaw) : "";
-
-    const ok = await safeDeferReply(interaction);
-    if (!ok) return;
+    if (name === "run") {
+      const lang = interaction.options.getString("lang", true);
+      const languageId = LANG[lang];
+      if (!languageId) {
+        await safeReply(interaction, { content: "Linguagem não suportada.", ephemeral: true });
+        return;
+      }
 
     try {
       const result = await runOnJudge0(languageId, code, stdin);
@@ -281,12 +562,59 @@ client.on("interactionCreate", async (interaction) => {
       const details =
         err?.response?.data ? JSON.stringify(err.response.data, null, 2) : (err?.message || "desconhecido");
       await replyOutput(interaction, "Erro ao executar.\n\n" + details);
-    }
+      const codeRaw = interaction.options.getString("code", false);
+      const inputRaw = interaction.options.getString("input", false);
 
-    return;
+      if (!codeRaw || !codeRaw.trim()) {
+        await safeShowModal(interaction, buildRunModal(lang));
+        return;
+      }
+
+      const code = sanitizeInvisible(stripCodeFences(codeRaw));
+      const stdin = inputRaw ? sanitizeInvisible(inputRaw) : "";
+
+      const ok = await safeDeferReply(interaction, true);
+      if (!ok) return;
+
+      try {
+        const result = await runOnJudge0(languageId, code, stdin);
+        const out = formatOutput(result);
+        await replyOutput(interaction, out);
+      } catch (err) {
+        const details =
+          err?.response?.data ? JSON.stringify(err.response.data, null, 2) : (err?.message || "desconhecido");
+        await replyOutput(interaction, "Erro ao executar.\n\n" + details);
+      }
+
+      return;
+    }
   }
 
   if (interaction.isModalSubmit() && interaction.customId.startsWith("run_modal:")) {
+    if (interaction.inGuild()) {
+      const partsRaw = [
+        interaction.fields.getTextInputValue("code1") || "",
+        interaction.fields.getTextInputValue("code2") || "",
+        interaction.fields.getTextInputValue("code3") || "",
+        interaction.fields.getTextInputValue("code4") || "",
+        interaction.fields.getTextInputValue("code5") || "",
+      ];
+
+      const joined = partsRaw.join("\n").trim();
+
+      pushEvent(interaction.guildId, {
+        type: "modalSubmit",
+        iso: nowIso(),
+        ts: Date.now(),
+        guildId: interaction.guildId,
+        channelId: interaction.channelId,
+        modalId: interaction.customId,
+        userId: interaction.user.id,
+        userTag: interaction.user.tag,
+        code: clipContent(joined),
+      });
+    }
+
     const lang = interaction.customId.split(":")[1];
     const languageId = LANG[lang];
 
@@ -304,6 +632,7 @@ client.on("interactionCreate", async (interaction) => {
     ];
 
     let code = sanitizeInvisible(stripCodeFences(parts.join("\n").trim()));
+    const code = sanitizeInvisible(stripCodeFences(parts.join("\n").trim()));
 
     if (!code) {
       await safeReply(interaction, { content: "Você não colou nenhum código.", ephemeral: true });
@@ -311,6 +640,7 @@ client.on("interactionCreate", async (interaction) => {
     }
 
     const ok = await safeDeferReply(interaction);
+    const ok = await safeDeferReply(interaction, true);
     if (!ok) return;
 
     try {
@@ -325,4 +655,5 @@ client.on("interactionCreate", async (interaction) => {
   }
 });
 
+client.login(process.env.DISCORD_TOKEN);
 client.login(process.env.DISCORD_TOKEN);
