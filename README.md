@@ -10,14 +10,14 @@
 Designed for educational servers, programming communities, and
 moderation-aware environments.
 
-A production-grade Discord bot that executes Java code securely using
-Judge0 and includes an advanced in-memory logging system.
+#### A production-grade Discord bot that executes Java code securely using
+#### Judge0 and includes an advanced in-memory logging system.
 ------------------------------------------------------------------------
 
-# Invite Bot link and Support Server
+## Invite Bot link and Support Server
 
-Here is the link to add the bot to your server:
-[BotLink](https://discord.com/oauth2/authorize?client_id=1471306586088800381). Join the bot’s support server if you have any questions: [BotDiscordServer](https://discord.gg/fqfrxsS5WN).
+#### Here is the link to add the bot to your server: [BotLink](https://discord.com/oauth2/authorize?client_id=1471306586088800381). 
+#### Join the bot’s support server if you have any questions: [BotDiscordServer](https://discord.gg/fqfrxsS5WN).
 ------------------------------------------------------------------------
 
 # Overview
