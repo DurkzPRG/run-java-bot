@@ -350,11 +350,11 @@ client.on("interactionCreate", async (interaction) => {
       .setTitle("📖 Bot Commands")
       .setDescription("Here are the available commands:")
       .addFields(
-        { name: "💻 /run", value: "Executa código Java usando Judge0." },
-        { name: "🧹 /clear", value: "Apaga até 100 mensagens." },
-        { name: "📝 /setlogs", value: "Define canal de logs." },
-        { name: "📦 /genlog", value: "Gera arquivo JSON de logs." },
-        { name: "ℹ️ /help", value: "Mostra esta mensagem." }
+        { name: "💻 /run", value: "Executes Java code using Judge0." },
+        { name: "🧹 /clear", value: "Deletes up to 100 messages." },
+        { name: "📝 /setlogs", value: "Sets the log channel." },
+        { name: "📦 /genlog", value: "Generates a JSON log file." },
+        { name: "ℹ️ /help", value: "Display this message" }
       )
       .setTimestamp();
 
