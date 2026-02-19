@@ -1,5 +1,5 @@
 require("dotenv").config();
-const { REST, Routes, SlashCommandBuilder } = require("discord.js");
+
 const {
   REST,
   Routes,
@@ -35,7 +35,6 @@ const commands = [
 
   new SlashCommandBuilder()
     .setName("clear")
-    .setDescription("Apaga as últimas N mensagens do canal (até 100).")
     .setDescription("Apaga as últimas X mensagens do canal (até 100).")
     .addIntegerOption((opt) =>
       opt
@@ -45,13 +44,12 @@ const commands = [
         .setMinValue(1)
         .setMaxValue(100)
     )
-
     .toJSON(),
 
   new SlashCommandBuilder()
-      .setName("help")
-      .setDescription("Mostra todos os comandos disponíveis do bot.")
-      .toJSON(),
+    .setName("help")
+    .setDescription("Mostra todos os comandos disponíveis do bot.")
+    .toJSON(),
 
   new SlashCommandBuilder()
     .setName("setlogs")
@@ -86,7 +84,9 @@ const rest = new REST({ version: "10" }).setToken(process.env.DISCORD_TOKEN);
       ? Routes.applicationGuildCommands(clientId, guildId)
       : Routes.applicationCommands(clientId);
 
-    console.log(guildId ? "Registrando comandos (guild)..." : "Registrando comandos (global)...");
+    console.log(
+      guildId ? "Registrando comandos (guild)..." : "Registrando comandos (global)..."
+    );
 
     await rest.put(route, { body: commands });
     console.log("Comandos registrados!");
