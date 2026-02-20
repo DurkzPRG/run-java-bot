@@ -420,7 +420,7 @@ client.on("interactionCreate", async (interaction) => {
 		const embed = new EmbedBuilder()
 			.setTitle("Run Java Bot Help")
 			.setDescription("A lightweight code runner + logging bot for Discord.")
-			addFields(
+			.addFields(
 		{
 			name: "Working commands",
 				value:
