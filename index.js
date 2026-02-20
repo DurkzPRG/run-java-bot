@@ -1,950 +1,643 @@
-import "dotenv/config";
-import express from "express";
-import {
+require("dotenv").config();
+require("./server");
+
+const axios = require("axios");
+const {
   Client,
   GatewayIntentBits,
-  ActionRowBuilder,
-  ButtonBuilder,
-  ButtonStyle,
+  Partials,
   ModalBuilder,
   TextInputBuilder,
   TextInputStyle,
+  ActionRowBuilder,
+  AttachmentBuilder,
   PermissionFlagsBits,
-  MessageFlags,
-  EmbedBuilder,
-} from "discord.js";
-import { PrismaClient, Prisma } from "@prisma/client";
+} = require("discord.js");
 
-console.log("BOOT: src/index.js LOADED | v=stabilized-3");
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+    GatewayIntentBits.MessageContent,
+  ],
+  partials: [Partials.Message, Partials.Channel],
+});
 
+const JUDGE0_BASE = "https://ce.judge0.com";
 
+const LANG = { java: 62 };
 
-const processedInteractions = globalThis.__processedInteractions ?? new Map();
-globalThis.__processedInteractions = processedInteractions;
+const CPU_TIME_LIMIT = Number(process.env.CPU_TIME_LIMIT || 5);
+const WALL_TIME_LIMIT = Number(process.env.WALL_TIME_LIMIT || 8);
+const MEMORY_LIMIT = Number(process.env.MEMORY_LIMIT || 256000);
 
-setInterval(() => {
-  const now = Date.now();
-  for (const [id, ts] of processedInteractions.entries()) {
-    if (now - ts > 60_000) processedInteractions.delete(id);
-  }
-}, 30_000).unref();
+const POLL_INTERVAL_MS = Number(process.env.POLL_INTERVAL_MS || 700);
+const POLL_MAX_TRIES = Number(process.env.POLL_MAX_TRIES || 60);
 
-const app = express();
-const PORT = Number(process.env.PORT || 3000);
+const MAX_EVENTS_PER_GUILD = Number(process.env.MAX_EVENTS_PER_GUILD || 20000);
+const MAX_CONTENT_CHARS = Number(process.env.MAX_CONTENT_CHARS || 1000);
 
-app.get("/", (_req, res) => res.status(200).send("OK"));
-app.listen(PORT, "0.0.0.0", () => console.log("Health server up on port", PORT));
+const logChannelByGuild = new Map();
+const eventsByGuild = new Map();
 
-const client = new Client({ intents: [GatewayIntentBits.Guilds] });
-
-const prisma = new PrismaClient({ log: ["error", "warn"] });
-
-
-async function ensureWorkspace(_workspaceId) {
-  return;
+function nowIso() {
+  return new Date().toISOString();
 }
 
-function withTimeout(promise, ms, label) {
-  let t;
-  const timeout = new Promise((_, reject) => {
-    t = setTimeout(() => reject(new Error(`Timeout after ${ms}ms${label ? `: ${label}` : ""}`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(t));
+function sleep(ms) {
+  return new Promise((r) => setTimeout(r, ms));
 }
 
-async function initDb() {
-  try {
-    await withTimeout(prisma.$connect(), 8000, "prisma.$connect");
-    console.log("DB connected");
-  } catch (err) {
-    console.error("DB connect failed:", err);
-  }
-}
-initDb();
-
-setInterval(() => console.log("tick:", new Date().toISOString()), 60_000).unref();
-
-function slugify(title) {
-  return (title || "")
-    .trim()
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, "-")
-    .replace(/(^-|-$)/g, "")
-    .slice(0, 60);
+function stripCodeFences(s) {
+  if (!s) return s;
+  const t = s.trim();
+  const m = t.match(/^```(?:\w+)?\s*\n([\s\S]*?)\n```$/);
+  return m ? m[1] : s;
 }
 
-function looksLikeSlug(s) {
-  return /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(s || "");
-}
-
-function trimForDiscord(s, max = 1900) {
-  if (!s) return "";
-  return s.length > max ? s.slice(0, max - 3) + "..." : s;
+function sanitizeInvisible(s) {
+  if (!s) return s;
+  return s.replace(/[\u200B-\u200D\uFEFF]/g, "");
 }
 
 function clampInt(n, min, max) {
-  const x = Number.isFinite(n) ? n : min;
-  return Math.max(min, Math.min(max, x));
+  n = Number(n);
+  if (!Number.isFinite(n)) return min;
+  return Math.max(min, Math.min(max, Math.trunc(n)));
 }
 
-function ephemeralPayload(payload = {}) {
-  return { ...payload, flags: MessageFlags.Ephemeral };
+function isUnknownInteraction(err) {
+  return err && (err.code === 10062 || err.rawError?.code === 10062);
 }
 
+function isAlreadyAcknowledged(err) {
+  return err && (err.code === 40060 || err.rawError?.code === 40060);
+}
+
+function ensureGuildEvents(guildId) {
+  if (!eventsByGuild.has(guildId)) eventsByGuild.set(guildId, []);
+  return eventsByGuild.get(guildId);
+}
+
+function pushEvent(guildId, evt) {
+  const arr = ensureGuildEvents(guildId);
+  arr.push(evt);
+  if (arr.length > MAX_EVENTS_PER_GUILD) {
+    arr.splice(0, arr.length - MAX_EVENTS_PER_GUILD);
+  }
+}
+
+function clipContent(s) {
+  if (s == null) return null;
+  const t = String(s);
+  return t.length > MAX_CONTENT_CHARS ? t.slice(0, MAX_CONTENT_CHARS) : t;
+}
+
+function extractPayloadLogInfo(payload) {
+  // payload pode ser string ou objeto
+  if (typeof payload === "string") {
+    return {
+      content: clipContent(payload),
+      ephemeral: null,
+      embedsCount: 0,
+      filesCount: 0,
+      componentsCount: 0,
+    };
+  }
+
+  const content = clipContent(payload?.content ?? null);
+  const ephemeral = typeof payload?.ephemeral === "boolean" ? payload.ephemeral : null;
+
+  const embedsCount = Array.isArray(payload?.embeds) ? payload.embeds.length : 0;
+  const filesCount = Array.isArray(payload?.files) ? payload.files.length : 0;
+  const componentsCount = Array.isArray(payload?.components) ? payload.components.length : 0;
+
+  return { content, ephemeral, embedsCount, filesCount, componentsCount };
+}
+
+function pushBotEvent(interaction, extra = {}) {
+  const guildId = interaction?.guildId;
+  if (!guildId) return;
+
+  pushEvent(guildId, {
+    type: "botAction",
+    iso: nowIso(),
+    ts: Date.now(),
+    guildId,
+    channelId: interaction.channelId ?? null,
+    userId: interaction.user?.id ?? null,
+    userTag: interaction.user?.tag ?? null,
+    command: typeof interaction?.commandName === "string" ? interaction.commandName : null,
+    ...extra,
+  });
+}
 
 async function safeReply(interaction, payload) {
   try {
-    if (interaction.deferred || interaction.replied) return await interaction.followUp(payload);
-    return await interaction.reply(payload);
+    const info = extractPayloadLogInfo(payload);
+
+    if (interaction.deferred) {
+      await interaction.editReply(payload);
+
+      pushBotEvent(interaction, {
+        action: "editReply_via_safeReply",
+        ...info,
+      });
+
+      return true;
+    }
+
+    if (interaction.replied) {
+      await interaction.followUp(payload);
+
+      pushBotEvent(interaction, {
+        action: "followUp",
+        ...info,
+      });
+
+      return true;
+    }
+
+    await interaction.reply(payload);
+
+    pushBotEvent(interaction, {
+      action: "reply",
+      ...info,
+    });
+
+    return true;
   } catch (err) {
-    console.error("safeReply failed:", err);
-    return null;
+    if (isUnknownInteraction(err)) return false;
+    if (isAlreadyAcknowledged(err)) return true;
+    throw err;
   }
 }
 
-async function safeEdit(interaction, payload) {
+async function safeShowModal(interaction, modal) {
   try {
-    if (interaction.deferred || interaction.replied) return await interaction.editReply(payload);
-    return await interaction.reply(payload);
-  } catch (err) {
-    const code = err?.code;
-    if (code === 40060) {
+    const okType =
+      typeof interaction?.isChatInputCommand === "function" && interaction.isChatInputCommand();
+    const okFn = typeof interaction?.showModal === "function";
+
+    if (!okType || !okFn) {
       try {
-        return await interaction.editReply(payload);
-      } catch (err2) {
-        console.error("safeEdit failed:", err2);
-        return null;
-      }
+        await safeReply(interaction, {
+          content: "Não consegui abrir o modal aqui. Tente usar o comando novamente.",
+          ephemeral: true,
+        });
+      } catch {}
+      return false;
     }
-    if (code === 10062) {
-      console.error("safeEdit failed:", err);
-      return null;
-    }
-    try {
-      if (interaction.deferred || interaction.replied) return await interaction.editReply(payload);
-      return await interaction.reply(payload);
-    } catch (err2) {
-      console.error("safeEdit failed:", err2);
-      return null;
-    }
-  }
-}
 
-async function safeDeferReply(interaction, flags) {
-  try {
-    if (interaction.deferred || interaction.replied) return true;
-    await interaction.deferReply({ flags });
+    await interaction.showModal(modal);
     return true;
   } catch (err) {
-    const code = err?.code;
-    if (code === 40060) return true;
-    console.error("safeDeferReply failed:", err);
-    return false;
+    if (isUnknownInteraction(err)) return false;
+    throw err;
   }
 }
 
-
-async function safeDeferUpdate(interaction) {
+async function safeDeferReply(interaction, ephemeral = true) {
   try {
     if (interaction.deferred || interaction.replied) return true;
-    await interaction.deferUpdate();
+    await interaction.deferReply({ ephemeral });
+
+    pushBotEvent(interaction, {
+      action: "deferReply",
+      ephemeral: Boolean(ephemeral),
+      content: null,
+      embedsCount: 0,
+      filesCount: 0,
+      componentsCount: 0,
+    });
+
     return true;
   } catch (err) {
-    const code = err?.code;
-    if (code === 40060) return true;
-    console.error("safeDeferUpdate failed:", err);
-    return false;
+    if (isUnknownInteraction(err)) return false;
+    if (isAlreadyAcknowledged(err)) return true;
+    throw err;
   }
 }
 
-
-
-function makeListKey(workspaceId, search, pageNum) {
-  const s = (search || "").trim();
-  const p = clampInt(pageNum || 1, 1, 1000);
-  return `pl|${workspaceId}|${encodeURIComponent(s)}|${p}`;
-}
-
-function parseListKey(customId) {
-  if (!customId || !customId.startsWith("pl|")) return null;
-  const parts = customId.split("|");
-  if (parts.length !== 4) return null;
-  const workspaceId = parts[1];
-  const search = decodeURIComponent(parts[2] || "");
-  const pageNum = Number(parts[3]);
-  return { workspaceId, search, pageNum: Number.isFinite(pageNum) ? pageNum : 1 };
-}
-
-function openKey(workspaceId, slug) {
-  return `po|${workspaceId}|${slug}`;
-}
-function parseOpenKey(customId) {
-  if (!customId || !customId.startsWith("po|")) return null;
-  const parts = customId.split("|");
-  if (parts.length !== 3) return null;
-  return { workspaceId: parts[1], slug: parts[2] };
-}
-function editKey(workspaceId, slug) {
-  return `pe|${workspaceId}|${slug}`;
-}
-function delKey(workspaceId, slug) {
-  return `pd|${workspaceId}|${slug}`;
-}
-function delConfirmKey(workspaceId, slug) {
-  return `pdc|${workspaceId}|${slug}`;
-}
-function parseKey3(prefix, customId) {
-  if (!customId || !customId.startsWith(prefix + "|")) return null;
-  const parts = customId.split("|");
-  if (parts.length !== 3) return null;
-  return { workspaceId: parts[1], slug: parts[2] };
-}
-
-function editModalKey(workspaceId, slug) {
-  return `pem|${workspaceId}|${slug}`;
-}
-
-function modalEditId(workspaceId, slug) {
-  return `pm|${workspaceId}|${slug}`;
-}
-function parseModalEditId(customId) {
-  if (!customId || !customId.startsWith("pm|")) return null;
-  const parts = customId.split("|");
-  if (parts.length !== 3) return null;
-  return { workspaceId: parts[1], slug: parts[2] };
-}
-
-function isAdmin(interaction) {
+async function safeEditReply(interaction, payload) {
   try {
-    return Boolean(
-      interaction.memberPermissions?.has(PermissionFlagsBits.Administrator) ||
-        interaction.memberPermissions?.has(PermissionFlagsBits.ManageGuild)
-    );
-  } catch {
-    return false;
-  }
-}
+    await interaction.editReply(payload);
 
-async function refreshSearchVector(pageId) {
-  try {
-    await withTimeout(
-      prisma.$executeRaw(
-        Prisma.sql`UPDATE "Page" SET "searchVector" = to_tsvector('simple', coalesce("title",'') || ' ' || coalesce("contentMd",'')) WHERE "id" = ${pageId}`
-      ),
-      8000,
-      "refreshSearchVector"
-    );
+    const info = extractPayloadLogInfo(payload);
+
+    pushBotEvent(interaction, {
+      action: "editReply",
+      ...info,
+    });
+
+    return true;
   } catch (err) {
-    console.error("refreshSearchVector failed:", err);
+    if (isUnknownInteraction(err)) return false;
+    throw err;
   }
 }
 
-async function renderPageOpen(workspaceId, page) {
-  const meta = [
-    `version: ${page.version}`,
-    `updated: ${new Date(page.updatedAt).toISOString().slice(0, 19).replace("T", " ")}`,
-  ].join("\n");
-
-  const content = (page.contentMd || "").trim() || "(empty)";
-  const text = `${page.title} (slug: ${page.slug})\n\n${meta}\n\n${content}`;
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(editKey(workspaceId, page.slug)).setLabel("Edit").setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(delKey(workspaceId, page.slug)).setLabel("Delete").setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId(openKey(workspaceId, page.slug)).setLabel("Refresh").setStyle(ButtonStyle.Secondary)
-  );
-
-  return { content: trimForDiscord(text, 1900), components: [row] };
+function baseMsgEvent(type, message) {
+  return {
+    type,
+    iso: nowIso(),
+    ts: Date.now(),
+    guildId: message.guild?.id ?? null,
+    channelId: message.channel?.id ?? null,
+    channelName: message.channel?.name ?? null,
+    messageId: message.id ?? null,
+    authorId: message.author?.id ?? null,
+    authorTag: message.author?.tag ?? null,
+    authorIsBot: Boolean(message.author?.bot),
+    content: clipContent(message.content ?? null),
+  };
 }
 
-async function runPageList(interaction, workspaceId, search, pageNum) {
-  const take = 10;
-  const p = clampInt(pageNum || 1, 1, 1000);
-  const skip = (p - 1) * take;
-  const s = (search || "").trim();
+function shouldSkipLogging(message) {
+  if (!message?.guild) return true;
+  const logCh = logChannelByGuild.get(message.guild.id);
+  return Boolean(logCh && message.channel?.id === logCh);
+}
 
-  const where = {
-    workspaceId,
-    ...(s
-      ? {
-          OR: [
-            { title: { contains: s, mode: "insensitive" } },
-            { slug: { contains: slugify(s), mode: "insensitive" } },
-            { contentMd: { contains: s, mode: "insensitive" } },
-          ],
-        }
-      : {}),
+client.on("messageCreate", (message) => {
+  if (shouldSkipLogging(message)) return;
+  pushEvent(message.guild.id, baseMsgEvent("messageCreate", message));
+});
+
+client.on("messageUpdate", async (oldMsg, newMsg) => {
+  try {
+    if (oldMsg.partial) oldMsg = await oldMsg.fetch().catch(() => oldMsg);
+    if (newMsg.partial) newMsg = await newMsg.fetch().catch(() => newMsg);
+    if (!newMsg?.guild) return;
+
+    const logCh = logChannelByGuild.get(newMsg.guild.id);
+    if (logCh && newMsg.channel?.id === logCh) return;
+
+    const before = oldMsg?.content ?? null;
+    const after = newMsg?.content ?? null;
+    if (before === after) return;
+
+    const evt = baseMsgEvent("messageUpdate", newMsg);
+    evt.before = clipContent(before);
+    evt.after = clipContent(after);
+    pushEvent(newMsg.guild.id, evt);
+  } catch {}
+});
+
+client.on("messageDelete", async (message) => {
+  try {
+    if (message.partial) message = await message.fetch().catch(() => message);
+    if (!message?.guild) return;
+
+    const logCh = logChannelByGuild.get(message.guild.id);
+    if (logCh && message.channel?.id === logCh) return;
+
+    pushEvent(message.guild.id, baseMsgEvent("messageDelete", message));
+  } catch {}
+});
+
+async function runOnJudge0(languageId, sourceCode, stdinText) {
+  const payload = {
+    language_id: languageId,
+    source_code: Buffer.from(sourceCode, "utf8").toString("base64"),
+    cpu_time_limit: CPU_TIME_LIMIT,
+    wall_time_limit: WALL_TIME_LIMIT,
+    memory_limit: MEMORY_LIMIT,
   };
 
-  const [total, rows] = await withTimeout(
-    Promise.all([
-      prisma.page.count({ where }),
-      prisma.page.findMany({
-        where,
-        orderBy: { updatedAt: "desc" },
-        skip,
-        take,
-        select: { title: true, slug: true, id: true },
-      }),
-    ]),
-    8000,
-    "page-list query"
+  if (stdinText && stdinText.trim()) {
+    payload.stdin = Buffer.from(stdinText, "utf8").toString("base64");
+  }
+
+  const createRes = await axios.post(
+    `${JUDGE0_BASE}/submissions?base64_encoded=true&wait=false`,
+    payload
   );
 
-  const totalPages = Math.max(1, Math.ceil(total / take));
-  const current = clampInt(p, 1, totalPages);
+  const token = createRes.data.token;
 
-  if (!rows.length) {
-    return safeEdit(interaction, ephemeralPayload({ content: s ? "No pages found for that search." : "No pages yet.", components: [] }));
+  for (let i = 0; i < POLL_MAX_TRIES; i++) {
+    await sleep(POLL_INTERVAL_MS);
+    const res = await axios.get(`${JUDGE0_BASE}/submissions/${token}?base64_encoded=true`);
+    const status = res.data.status?.id;
+    if (status !== 1 && status !== 2) return res.data;
   }
 
-  const header =
-    `Pages ${skip + 1}-${Math.min(skip + rows.length, total)} of ${total} (page ${current}/${totalPages})` + (s ? ` | search: ${s}` : "");
-
-  const lines = rows.map((r, i) => `${skip + i + 1}. ${r.title}  |  ${r.slug}`);
-
-  const prevPage = Math.max(1, current - 1);
-  const nextPage = Math.min(totalPages, current + 1);
-  const prevId = makeListKey(workspaceId, s, prevPage);
-  const nextId = makeListKey(workspaceId, s, nextPage);
-
-  let components = [];
-
-  if (totalPages > 1) {
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder()
-        .setCustomId(prevId)
-        .setLabel("Previous")
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(current <= 1),
-      new ButtonBuilder()
-        .setCustomId(nextId)
-        .setLabel("Next")
-        .setStyle(ButtonStyle.Secondary)
-        .setDisabled(current >= totalPages)
-    );
-    components = [row];
-  }
-
-  return safeEdit(interaction, ephemeralPayload({ content: trimForDiscord(`${header}\n\n${lines.join("\n")}`, 1900), components }));
+  throw new Error("Timeout no polling do Judge0.");
 }
 
-
-async function findPageByQuery(workspaceId, query) {
-  const q = String(query || "").trim();
-  if (!q) return null;
-
-  if (looksLikeSlug(q)) {
-    const bySlug = await withTimeout(
-      prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId, slug: q } } }),
-      8000,
-      "findPageByQuery/slug"
-    ).catch(() => null);
-    if (bySlug) return bySlug;
-  }
-
-  const slugQ = slugify(q);
-  const rows = await withTimeout(
-    prisma.page.findMany({
-      where: {
-        workspaceId,
-        OR: [
-          { title: { equals: q, mode: "insensitive" } },
-          ...(slugQ ? [{ slug: { equals: slugQ, mode: "insensitive" } }] : []),
-          { title: { contains: q, mode: "insensitive" } },
-          ...(slugQ ? [{ slug: { contains: slugQ, mode: "insensitive" } }] : []),
-        ],
-      },
-      orderBy: { updatedAt: "desc" },
-      take: 1,
-    }),
-    8000,
-    "findPageByQuery/fuzzy"
-  ).catch(() => []);
-  return rows?.[0] ?? null;
+function decode(value) {
+  if (!value) return "";
+  return Buffer.from(value, "base64").toString("utf8");
 }
 
-client.once("ready", () => {
-  console.log(`Bot online como ${client.user?.tag}`);
-});
-client.once("clientReady", () => {
-  console.log(`Bot online (clientReady) como ${client.user?.tag}`);
-});
+function formatOutput(data) {
+  const stdout = decode(data.stdout);
+  const stderr = decode(data.stderr);
+  const compile = decode(data.compile_output);
+  const status = data.status?.description ?? "Unknown";
 
-
-if (globalThis.__interactionCreateInstalled) {
-  try { client.removeAllListeners("interactionCreate"); } catch {}
+  if (compile) return `Status: ${status}\n\n[compile]\n${compile}`;
+  if (stderr) return `Status: ${status}\n\n[stderr]\n${stderr}`;
+  if (stdout) return `Status: ${status}\n\n[stdout]\n${stdout}`;
+  return `Status: ${status}\n\n(sem saída)`;
 }
-globalThis.__interactionCreateInstalled = true;
 
-client.removeAllListeners("interactionCreate");
-client.on("interactionCreate", (interaction) => {
-
-const _seenTs = processedInteractions.get(interaction.id);
-if (_seenTs) return;
-processedInteractions.set(interaction.id, Date.now());
-
-  try {
-    console.error("INTERACTION RECEIVED:", {
-      id: interaction.id,
-      type: interaction.type,
-      isChat: Boolean(interaction.isChatInputCommand?.()),
-      isBtn: Boolean(interaction.isButton?.()),
-      cmd: interaction.commandName,
-      customId: interaction.customId,
-      guildId: interaction.guildId,
-    });
-  } catch (e) {
-    console.error("INTERACTION LOG FAILED:", e);
-  }
-
-
-
-  (async () => {
-    try {
-
-if (interaction.isAutocomplete()) {
-  const guildId = interaction.guildId;
-  if (!guildId) {
-    await interaction.respond([]).catch(() => {});
+async function replyOutput(interaction, text) {
+  const wrapped = "```txt\n" + text + "\n```";
+  if (wrapped.length <= 1900) {
+    await safeEditReply(interaction, wrapped);
     return;
   }
 
-  const cmd = interaction.commandName;
-  const focused = interaction.options.getFocused(true);
-  const q = String(focused?.value ?? "").trim();
+  const file = new AttachmentBuilder(Buffer.from(text, "utf8"), { name: "output.txt" });
+
+  await safeEditReply(interaction, {
+    content: "Saída grande. Enviado como arquivo:",
+    files: [file],
+  });
+}
+
+function buildRunModal(lang) {
+  const modal = new ModalBuilder()
+    .setCustomId(`run_modal:${lang}`)
+    .setTitle(`Cole seu código (${lang.toUpperCase()})`);
+
+  const field = (id, label) =>
+    new ActionRowBuilder().addComponents(
+      new TextInputBuilder()
+        .setCustomId(id)
+        .setLabel(label)
+        .setStyle(TextInputStyle.Paragraph)
+        .setRequired(false)
+        .setMaxLength(4000)
+    );
+
+  modal.addComponents(
+    field("code1", "Código/Code (part 1/5)"),
+    field("code2", "Código/Code (part 2/5)"),
+    field("code3", "Código/Code (part 3/5)"),
+    field("code4", "Código/Code (part 4/5)"),
+    field("code5", "Código/Code (part 5/5)")
+  );
+
+  return modal;
+}
+
+process.on("unhandledRejection", (reason) => console.error("unhandledRejection:", reason));
+process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
+client.on("error", (err) => console.error("client error:", err));
+
+client.once("clientReady", () => {
+  console.log(`Bot online as ${client.user.tag}`);
+});
+
+client.on("interactionCreate", async (interaction) => {
+  if (interaction.isChatInputCommand()) {
+    const name = interaction.commandName;
+
+    if (name === "setlogs") {
+      if (!interaction.inGuild()) {
+        await safeReply(interaction, { content: "Esse comando só funciona em servidores.", ephemeral: true });
+        return;
+      }
+
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+        await safeReply(interaction, { content: "Apenas administradores podem usar esse comando.", ephemeral: true });
+        return;
+      }
+
+      const ch = interaction.options.getChannel("channel", true);
+      logChannelByGuild.set(interaction.guildId, ch.id);
+
+      await safeReply(interaction, { content: `✅ Canal de logs definido: ${ch}`, ephemeral: true });
+      return;
+    }
+
+    if (name === "help") {
+		const { EmbedBuilder } = require("discord.js");
+
+		const embed = new EmbedBuilder()
+			.setTitle("Run Java Bot Help")
+			.setDescription("A lightweight code runner + logging bot for Discord.")
+			addFields(
+		{
+			name: "Working commands",
+				value:
+			"**Code Runner**\n" +
+			"• ` /run ` — Execute Java code (Judge0)\n\n" +
+			"**Moderation**\n" +
+			"• ` /clear amount ` — Delete up to 100 messages\n\n" +
+			"**Logging**\n" +
+			"• ` /setlogs channel ` — Set the logs channel (admin)\n" +
+			"• ` /genlog ` — Generate and send a JSON log (admin)\n\n" +
+			"**Info**\n" +
+			"• ` /help ` — Show this message",
+      }
+    )
+    .setFooter({ text: "Logs are kept in memory and reset when the bot restarts." });
+
+  await safeReply(interaction, { embeds: [embed], ephemeral: true });
+  return;
+}
+
+    if (name === "genlog") {
+      if (!interaction.inGuild()) {
+        await safeReply(interaction, { content: "Esse comando só funciona em servidores.", ephemeral: true });
+        return;
+      }
+
+      if (!interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)) {
+        await safeReply(interaction, { content: "Apenas administradores podem usar esse comando.", ephemeral: true });
+        return;
+      }
+
+      const logChannelId = logChannelByGuild.get(interaction.guildId);
+      if (!logChannelId) {
+        await safeReply(interaction, { content: "❌ Use /setlogs primeiro.", ephemeral: true });
+        return;
+      }
+
+      const ok = await safeDeferReply(interaction, true);
+      if (!ok) return;
+
+      const logCh = interaction.guild.channels.cache.get(logChannelId);
+      if (!logCh || typeof logCh.send !== "function") {
+        await safeEditReply(interaction, { content: "❌ Não consegui acessar o canal de logs configurado." });
+        return;
+      }
+
+      const events = ensureGuildEvents(interaction.guildId);
+
+      const messages = events.filter((e) => typeof e?.type === "string" && e.type.startsWith("message"));
+      const botActions = events.filter((e) => e?.type === "botAction");
+      const otherEvents = events.filter(
+        (e) => e && typeof e.type === "string" && !e.type.startsWith("message") && e.type !== "botAction"
+      );
+
+      const payload = {
+        guildId: interaction.guildId,
+        generatedAt: nowIso(),
+        generatedBy: { userId: interaction.user.id, userTag: interaction.user.tag },
+        counts: {
+          totalEvents: events.length,
+          messages: messages.length,
+          botActions: botActions.length,
+          otherEvents: otherEvents.length,
+        },
+        sections: {
+          messages,
+          botActions,
+          otherEvents,
+        },
+      };
+
+      const jsonText = JSON.stringify(payload, null, 2);
+      const file = new AttachmentBuilder(Buffer.from(jsonText, "utf8"), {
+        name: `log-${interaction.guildId}.json`,
+      });
+
+      await logCh.send({
+        content:
+          `📎 Log gerado por <@${interaction.user.id}> • ` +
+          `messages: **${messages.length}** • botActions: **${botActions.length}** • total: **${events.length}**`,
+        files: [file],
+      });
+
+      await safeEditReply(interaction, { content: "✅ Log gerado e enviado." });
+      return;
+    }
+
+if (name === "clear") {
+  if (!interaction.inGuild()) {
+    await safeReply(interaction, { content: "This command only works in servers.", ephemeral: true });
+    return;
+  }
 
   if (
-    cmd === "page-open" ||
-    cmd === "page-rename" ||
-    cmd === "page-move" ||
-    cmd === "tag-add" ||
-    cmd === "tag-remove" ||
-    cmd === "backlinks" ||
-    cmd === "export" ||
-    cmd === "import" ||
-    cmd === "page-history" ||
-    cmd === "page-rollback" ||
-    cmd === "perm-set" ||
-    cmd === "perm-list" ||
-    cmd === "perm-clear"
+    !interaction.memberPermissions?.has(PermissionFlagsBits.ManageMessages) &&
+    !interaction.memberPermissions?.has(PermissionFlagsBits.Administrator)
   ) {
-    const where = q
-      ? {
-          workspaceId: guildId,
-          OR: [
-            { title: { contains: q, mode: "insensitive" } },
-            { slug: { contains: slugify(q), mode: "insensitive" } },
-            { contentMd: { contains: q, mode: "insensitive" } },
-          ],
-        }
-      : { workspaceId: guildId };
-
-    const rows = await withTimeout(
-      prisma.page.findMany({
-        where,
-        orderBy: { updatedAt: "desc" },
-        take: 25,
-        select: { title: true, slug: true },
-      }),
-      8000,
-      "autocomplete/pages"
-    ).catch(() => []);
-
-    const choices = (rows || []).slice(0, 25).map((r) => ({
-      name: `${r.title}`.slice(0, 100),
-      value: r.slug,
-    }));
-
-    await interaction.respond(choices).catch(() => {});
+    await safeReply(interaction, {
+      content: "❌ Only moderators or administrators can use this command.",
+      ephemeral: true,
+    });
     return;
   }
 
-  await interaction.respond([]).catch(() => {});
-  return;
-}
+  const rawAmount = interaction.options.getInteger("amount");
+  const amount = clampInt(rawAmount ?? 5, 1, 100);
 
-      if (interaction.isButton()) {
-        const guildId = interaction.guildId;
-        if (!guildId) return;
+  const ok = await safeDeferReply(interaction, true);
+  if (!ok) return;
 
-        
-if (interaction.customId.startsWith("pe|")) {
-  const parsed = parseKey3("pe", interaction.customId);
-  if (!parsed) return;
-
-  if (parsed.workspaceId !== guildId) {
-    if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-    return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
-  }
-
-  const pagePromise = withTimeout(
-    prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } } }),
-    1800,
-    "page-edit/get"
-  ).catch(() => null);
-
-  const page = await Promise.race([pagePromise, new Promise((resolve) => setTimeout(() => resolve(null), 1200))]);
-
-  const contentValue = page?.contentMd ? String(page.contentMd).slice(0, 4000) : "";
-  const titleValue = page?.title ? String(page.title).slice(0, 100) : parsed.slug;
-
-  const modal = new ModalBuilder()
-    .setCustomId(editModalKey(guildId, parsed.slug))
-    .setTitle("Edit page")
-    .addComponents(
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("title")
-          .setLabel("Title")
-          .setStyle(TextInputStyle.Short)
-          .setRequired(true)
-          .setMaxLength(100)
-          .setValue(titleValue)
-      ),
-      new ActionRowBuilder().addComponents(
-        new TextInputBuilder()
-          .setCustomId("content")
-          .setLabel("Content (Markdown)")
-          .setStyle(TextInputStyle.Paragraph)
-          .setRequired(false)
-          .setMaxLength(4000)
-          .setValue(contentValue)
-      )
-    );
-
-  await interaction.showModal(modal).catch(async () => {
-    if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-    return safeEdit(interaction, ephemeralPayload({ content: "Could not open editor (try again).", components: [] }));
-  });
-  return;
-}
-
-if (interaction.customId.startsWith("pl|")) {
-          const parsed = parseListKey(interaction.customId);
-          if (!parsed) return;
-
-          if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-          if (parsed.workspaceId !== guildId) return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
-          return runPageList(interaction, guildId, parsed.search, parsed.pageNum);
-        }
-
-        if (interaction.customId.startsWith("po|")) {
-          const parsed = parseOpenKey(interaction.customId);
-          if (!parsed) return;
-
-          if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-          if (parsed.workspaceId !== guildId) return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
-
-          const page = await withTimeout(
-            prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } } }),
-            8000,
-            "page-open button"
-          );
-          if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
-
-          const payload = await renderPageOpen(guildId, page);
-          return safeEdit(interaction, ephemeralPayload(payload));
-        }
-
-        
-if (interaction.customId.startsWith("pd|")) {
-  const parsed = parseKey3("pd", interaction.customId);
-  if (!parsed) return;
-
-  if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-  if (parsed.workspaceId !== guildId) return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
-
-  const page = await withTimeout(
-    prisma.page.findUnique({ where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } } }),
-    8000,
-    "page-delete/get"
-  ).catch(() => null);
-
-  if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
-
-  const row = new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(delConfirmKey(guildId, parsed.slug)).setLabel("Confirm delete").setStyle(ButtonStyle.Danger),
-    new ButtonBuilder().setCustomId(openKey(guildId, parsed.slug)).setLabel("Cancel").setStyle(ButtonStyle.Secondary)
-  );
-
-  return safeEdit(
-    interaction,
-    ephemeralPayload({
-      content: `⚠️ Delete **${page.title}**? This cannot be undone.`,
-      components: [row],
-    })
-  );
-}
-
-if (interaction.customId.startsWith("pdc|")) {
-  const parsed = parseKey3("pdc", interaction.customId);
-  if (!parsed) return;
-
-  if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-  if (parsed.workspaceId !== guildId) return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
-
-  await withTimeout(
-    prisma.page.delete({ where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } } }),
-    8000,
-    "page-delete/delete"
-  ).catch(async (err) => {
-    if (err?.code === "P2025") return null;
-    throw err;
-  });
-
-  return safeEdit(interaction, ephemeralPayload({ content: "✅ Page deleted.", components: [] }));
-}
-
-return;
-      }
-
-      
-if (interaction.isModalSubmit && interaction.isModalSubmit()) {
-  const guildId = interaction.guildId;
-  if (!guildId) return;
-
-  if (interaction.customId.startsWith("pem|")) {
-    const parsed = parseKey3("pem", interaction.customId);
-    if (!parsed) return;
-
-    if (parsed.workspaceId !== guildId) {
-      if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-      return safeEdit(interaction, ephemeralPayload({ content: "Invalid action.", components: [] }));
-    }
-
-    const newTitle = String(interaction.fields.getTextInputValue("title") || "").trim().slice(0, 100);
-    const newContent = String(interaction.fields.getTextInputValue("content") || "");
-
-    if (!newTitle) {
-      if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-      return safeEdit(interaction, ephemeralPayload({ content: "Title cannot be empty.", components: [] }));
-    }
-
-    if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-
-    const baseSlug = slugify(newTitle) || parsed.slug;
-    let slug = baseSlug;
-
-    let updated = null;
-    for (let i = 0; i < 25; i++) {
-      try {
-        updated = await withTimeout(
-          prisma.page.update({
-            where: { workspaceId_slug: { workspaceId: guildId, slug: parsed.slug } },
-            data: { title: newTitle, slug, contentMd: newContent },
-          }),
-          8000,
-          "page-edit/update"
-        );
-        break;
-      } catch (err) {
-        if (err?.code === "P2002") {
-          slug = `${baseSlug}-${i + 2}`;
-          continue;
-        }
-        if (err?.code === "P2025") break;
-        throw err;
-      }
-    }
-
-    if (!updated) return safeEdit(interaction, ephemeralPayload({ content: "Page not found (maybe deleted).", components: [] }));
-
-    const row = new ActionRowBuilder().addComponents(
-      new ButtonBuilder().setCustomId(openKey(guildId, updated.slug)).setLabel("Open").setStyle(ButtonStyle.Primary),
-      new ButtonBuilder().setCustomId(makeListKey(guildId, "", 1)).setLabel("Back to list").setStyle(ButtonStyle.Secondary)
-    );
-
-    return safeEdit(
-      interaction,
-      ephemeralPayload({
-        content: `✅ Saved: **${updated.title}** (slug: \`${updated.slug}\`)`,
-        components: [row],
-      })
-    );
-  }
-
-  return;
-}
-
-if (!interaction.isChatInputCommand()) return;
-
-      const guildId = interaction.guildId;
-      if (!guildId) {
-        return interaction.reply(ephemeralPayload({ content: "This command only works inside a server." })).catch(() => {});
-      }
-      if (interaction.commandName === "page-list") {
-        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-        const search = interaction.options.getString("search") ?? "";
-        return runPageList(interaction, guildId, search, 1);
-      }
-
-      if (interaction.commandName === "page-open") {
-        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-        const query = interaction.options.getString("query", true);
-        const page = await findPageByQuery(guildId, query);
-        if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
-
-        const payload = await renderPageOpen(guildId, page);
-        return safeEdit(interaction, ephemeralPayload(payload));
-      }
-
-      if (interaction.commandName === "page-create") {
-        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-        const title = interaction.options.getString("title", true);
-        const content = interaction.options.getString("content") ?? "";
-        
-const baseSlug = slugify(title) || "page";
-
-let page = null;
-let slug = baseSlug;
-for (let i = 0; i < 25; i++) {
   try {
-    page = await withTimeout(
-      prisma.page.create({ data: { workspaceId: guildId, title, slug, contentMd: content } }),
-      8000,
-      "page-create/create"
+    const channel = interaction.channel;
+    if (!channel || typeof channel.bulkDelete !== "function") {
+      await safeEditReply(interaction, "I can't access this channel.");
+      return;
+    }
+
+    const me = interaction.guild.members.me;
+    if (!me) {
+      await safeEditReply(interaction, "Couldn't resolve bot permissions.");
+      return;
+    }
+
+    const perms = channel.permissionsFor(me);
+    if (!perms || !perms.has(PermissionFlagsBits.ManageMessages)) {
+      await safeEditReply(interaction, "Missing permission: Manage Messages.");
+      return;
+    }
+
+    const deleted = await channel.bulkDelete(amount, true);
+
+    await safeEditReply(
+      interaction,
+      `Cleared ${deleted.size} message(s). (Older than 14 days can't be deleted.)`
     );
-    break;
   } catch (err) {
-    if (err?.code === "P2002") {
-      slug = `${baseSlug}-${i + 2}`;
-      continue;
-    }
-    throw err;
+    await safeEditReply(interaction, "Error while deleting messages:\n" + (err?.message || "unknown"));
   }
+
+  return;
 }
 
-if (!page) {
-  return safeEdit(
-    interaction,
-    ephemeralPayload({ content: "Could not create the page (slug collision). Try a different title." })
-  );
-}
-await refreshSearchVector(page.id);
-        const payload = await renderPageOpen(guildId, page);
-        return safeEdit(interaction, ephemeralPayload(payload));
+
+    if (name === "run") {
+      const lang = interaction.options.getString("lang", true);
+      const languageId = LANG[lang];
+
+      if (!languageId) {
+        await safeReply(interaction, { content: "Linguagem não suportada.", ephemeral: true });
+        return;
       }
 
-      if (interaction.commandName === "help") {
-        const embed = new EmbedBuilder()
-          .setDescription("A lightweight Notion/Obsidian-style notes bot for Discord.")
-          .addFields(
-            {
-              name: "Working commands",
-              value: [
-                "**Pages**",
-                "• /page-create title content — Create a page",
-                "• /page-open query — Open a page by title/slug (and edit from the UI)",
-                "• /page-list [search] — List pages (optionally filter)",
-                "• /page-delete query — Delete a page",
-                "• /page-rename query title [keep_slug] — Rename a page",
-                "• /page-move query destination — Move a page under another page",
-                "",
-                "**Knowledge**",
-                "• /backlinks query — Pages that link to this page",
-                "",
-                "**Import / Export**",
-                "• /export — Export workspace to JSON",
-                "• /import data — Import JSON export",
-                "",
-                "**Productivity**",
-                "• /tag-add query tags — Add tags to a page",
-                "• /tag-remove query tags — Remove tags from a page",
-                "• /tag-list — List tags",
-                "• /search query — Search pages",
-                "• /daily — Open or create today's daily note",
-                "• /template-create name content — Save a template",
-                "• /template-use name title — Create a page from a template",
-                "",
-                "**Permissions**",
-                "• /perm-set ... — Set a rule",
-                "• /perm-list — List rules",
-                "• /perm-clear ... — Remove rules",
-                "",
-                "**History**",
-                "• /page-history query — List versions",
-                "• /page-rollback query version — Roll back to a version",
-              ].join("\n").slice(0, 1024),
-            }
-          );
+      const codeRaw = interaction.options.getString("code", false);
+      const inputRaw = interaction.options.getString("input", false);
 
-        return interaction.reply(ephemeralPayload({ embeds: [embed] })).catch(() => {});
-      }if (interaction.commandName === "page-rename") {
-        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-        const query = interaction.options.getString("query", true);
-        const newTitle = String(interaction.options.getString("title", true)).trim().slice(0, 100);
-        const keepSlug = Boolean(interaction.options.getBoolean("keep_slug") ?? false);
-
-        const page = await findPageByQuery(guildId, query);
-        if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
-        if (!newTitle) return safeEdit(interaction, ephemeralPayload({ content: "Title cannot be empty.", components: [] }));
-
-        let slug = page.slug;
-        if (!keepSlug) {
-          const baseSlug = slugify(newTitle) || "page";
-          slug = baseSlug;
-          for (let i = 0; i < 25; i++) {
-            try {
-              const updated = await withTimeout(
-                prisma.page.update({
-                  where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
-                  data: { title: newTitle, slug },
-                }),
-                8000,
-                "page-rename/update"
-              );
-              await refreshSearchVector(updated.id);
-              const payload = await renderPageOpen(guildId, updated);
-              return safeEdit(interaction, ephemeralPayload(payload));
-            } catch (err) {
-              if (err?.code === "P2002") {
-                slug = `${baseSlug}-${i + 2}`;
-                continue;
-              }
-              throw err;
-            }
-          }
-          return safeEdit(interaction, ephemeralPayload({ content: "Could not rename (slug collision).", components: [] }));
-        }
-
-        const updated = await withTimeout(
-          prisma.page.update({
-            where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
-            data: { title: newTitle },
-          }),
-          8000,
-          "page-rename/update-keep"
-        );
-        await refreshSearchVector(updated.id);
-        const payload = await renderPageOpen(guildId, updated);
-        return safeEdit(interaction, ephemeralPayload(payload));
+      if (!codeRaw || !codeRaw.trim()) {
+        await safeShowModal(interaction, buildRunModal(lang));
+        return;
       }
 
-      if (interaction.commandName === "page-move") {
-        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-        const query = interaction.options.getString("query", true);
-        const folder = String(interaction.options.getString("folder", true)).trim().replace(/^\/+|\/+$/g, "");
-        if (!folder) return safeEdit(interaction, ephemeralPayload({ content: "Folder cannot be empty.", components: [] }));
+      const code = sanitizeInvisible(stripCodeFences(codeRaw));
+      const stdin = inputRaw ? sanitizeInvisible(inputRaw) : "";
 
-        const page = await findPageByQuery(guildId, query);
-        if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
-        const newTitle = `${folder}/${page.title}`;
-        const updated = await withTimeout(
-          prisma.page.update({
-            where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
-            data: { title: newTitle.slice(0, 100) },
-          }),
-          8000,
-          "page-move/update"
-        );
-        await refreshSearchVector(updated.id);
-        const payload = await renderPageOpen(guildId, updated);
-        return safeEdit(interaction, ephemeralPayload(payload));
-      }
+      const ok = await safeDeferReply(interaction, true);
+      if (!ok) return;
 
-      if (interaction.commandName === "backlinks") {
-        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-        const query = interaction.options.getString("query", true);
-        const target = await findPageByQuery(guildId, query);
-        if (!target) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
-
-        const needles = [`[[${target.slug}]]`, `[[${target.title}]]`].filter(Boolean);
-        const rows = await withTimeout(
-          prisma.page.findMany({
-            where: {
-              workspaceId: guildId,
-              OR: needles.map((n) => ({ contentMd: { contains: n } })),
-            },
-            orderBy: { updatedAt: "desc" },
-            take: 25,
-            select: { title: true, slug: true },
-          }),
-          8000,
-          "backlinks/query"
-        ).catch(() => []);
-
-        if (!rows.length) return safeEdit(interaction, ephemeralPayload({ content: "No backlinks found.", components: [] }));
-
-        
-const lines = rows.map((r, i) => `${i + 1}. ${r.title} | ${r.slug}`);
-const text = `Backlinks to ${target.title} (${target.slug})\n\n` + lines.join("\n");
-return safeEdit(interaction, ephemeralPayload({ content: trimForDiscord(text, 1900), components: [] }));}
-
-      if (interaction.commandName === "export") {
-        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-        const query = interaction.options.getString("query", true);
-        const page = await findPageByQuery(guildId, query);
-        if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
-        const md = (page.contentMd || "").trim();
-        const content = `# ${page.title}
-
-${md}`;
-        return safeEdit(interaction, ephemeralPayload({ content: trimForDiscord(content, 1900), components: [] }));
-      }
-
-      if (interaction.commandName === "import") {
-        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-        const query = interaction.options.getString("query", true);
-        const content = String(interaction.options.getString("content", true));
-        const page = await findPageByQuery(guildId, query);
-        if (!page) return safeEdit(interaction, ephemeralPayload({ content: "Page not found.", components: [] }));
-        const updated = await withTimeout(
-          prisma.page.update({
-            where: { workspaceId_slug: { workspaceId: guildId, slug: page.slug } },
-            data: { contentMd: content },
-          }),
-          8000,
-          "import/update"
-        );
-        await refreshSearchVector(updated.id);
-        const payload = await renderPageOpen(guildId, updated);
-        return safeEdit(interaction, ephemeralPayload(payload));
-      }
-
-      if (
-        interaction.commandName === "tag-add" ||
-        interaction.commandName === "tag-remove" ||
-        interaction.commandName === "tag-list" ||
-        interaction.commandName === "search" ||
-        interaction.commandName === "daily" ||
-        interaction.commandName === "template-create" ||
-        interaction.commandName === "template-use" ||
-        interaction.commandName === "page-history" ||
-        interaction.commandName === "page-rollback" ||
-        interaction.commandName === "perm-set" ||
-        interaction.commandName === "perm-list" ||
-        interaction.commandName === "perm-clear"
-      ) {
-        if (!(await safeDeferReply(interaction, MessageFlags.Ephemeral))) return;
-        return safeEdit(interaction, ephemeralPayload({ content: "This command is not implemented in this build.", components: [] }));
-      }
-
-return interaction.reply(ephemeralPayload({ content: "Unknown command." })).catch(() => {});
-    } catch (err) {
-      console.error("interaction handler crashed:", err);
       try {
-        if (interaction.deferred || interaction.replied) {
-          await interaction.editReply(ephemeralPayload({ content: "Command error.", components: [] }));
-        } else {
-          await interaction.reply(ephemeralPayload({ content: "Command error." }));
-        }
-      } catch {}
+        const result = await runOnJudge0(languageId, code, stdin);
+        const out = formatOutput(result);
+        await replyOutput(interaction, out);
+      } catch (err) {
+        const details =
+          err?.response?.data ? JSON.stringify(err.response.data, null, 2) : (err?.message || "desconhecido");
+        await replyOutput(interaction, "Erro ao executar.\n\n" + details);
+      }
+
+      return;
     }
-  })();
-});
+  }
 
-process.on("unhandledRejection", (err) => console.error("unhandledRejection:", err));
-process.on("uncaughtException", (err) => console.error("uncaughtException:", err));
+  if (interaction.isModalSubmit() && interaction.customId.startsWith("run_modal:")) {
+    const lang = interaction.customId.split(":")[1];
+    const languageId = LANG[lang];
 
-process.on("SIGINT", async () => {
-  await prisma.$disconnect();
-  process.exit(0);
-});
+    if (!languageId) {
+      await safeReply(interaction, { content: "Linguagem não suportada.", ephemeral: true });
+      return;
+    }
 
-process.on("SIGTERM", async () => {
-  await prisma.$disconnect();
-  process.exit(0);
+    const parts = [
+      interaction.fields.getTextInputValue("code1") || "",
+      interaction.fields.getTextInputValue("code2") || "",
+      interaction.fields.getTextInputValue("code3") || "",
+      interaction.fields.getTextInputValue("code4") || "",
+      interaction.fields.getTextInputValue("code5") || "",
+    ];
+
+    const code = sanitizeInvisible(stripCodeFences(parts.join("\n").trim()));
+
+    if (!code) {
+      await safeReply(interaction, { content: "Você não colou nenhum código.", ephemeral: true });
+      return;
+    }
+
+    const ok = await safeDeferReply(interaction, true);
+    if (!ok) return;
+
+    try {
+      const result = await runOnJudge0(languageId, code, "");
+      const out = formatOutput(result);
+      await replyOutput(interaction, out);
+    } catch (err) {
+      const details =
+        err?.response?.data ? JSON.stringify(err.response.data, null, 2) : (err?.message || "desconhecido");
+      await replyOutput(interaction, "Erro ao executar.\n\n" + details);
+    }
+  }
 });
 
 client.login(process.env.DISCORD_TOKEN);
